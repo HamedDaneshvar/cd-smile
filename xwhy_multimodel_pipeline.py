@@ -1,4 +1,4 @@
-"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.5`).
+"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.7`).
 
 Automated Perturbation-Based Explainability & Verification Pipeline:
 - Executes the XWhy (CD-SMILE) perturbation-based explainability method across active
@@ -47,6 +47,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 import gc
 import inspect
+import itertools
 import json
 import logging
 import math
@@ -72,7 +73,8 @@ os.environ.setdefault("OLLAMA_MAX_LOADED_MODELS", "1")
 os.environ.setdefault("OLLAMA_NUM_PARALLEL", "1")
 os.environ.setdefault("OLLAMA_FLASH_ATTENTION", "1")
 os.environ.setdefault("GOGC", "50")
-os.environ.setdefault("GOMEMLIMIT", "2500MiB")
+os.environ.setdefault("GOMEMLIMIT", "1800MiB")
+os.environ.setdefault("OLLAMA_KEEP_ALIVE", "5m")
 
 try:
     import matplotlib.pyplot as plt
@@ -623,11 +625,11 @@ def start_ollama_daemon() -> None:
     ollama_env = dict(os.environ)
     ollama_env.update({
         "GOGC": "50",
-        "GOMEMLIMIT": "2500MiB",
+        "GOMEMLIMIT": "1800MiB",
         "OLLAMA_MAX_LOADED_MODELS": "1",
         "OLLAMA_NUM_PARALLEL": "1",
         "OLLAMA_FLASH_ATTENTION": "1",
-        "OLLAMA_KEEP_ALIVE": "1h",
+        "OLLAMA_KEEP_ALIVE": "5m",
     })
     subprocess.Popen(
         ["ollama", "serve"],
@@ -657,8 +659,8 @@ def ensure_ollama_alive() -> None:
     os.environ["OLLAMA_MAX_LOADED_MODELS"] = "1"
     os.environ["OLLAMA_FLASH_ATTENTION"] = "1"
     os.environ["GOGC"] = "50"
-    os.environ["GOMEMLIMIT"] = "2500MiB"
-    os.environ["OLLAMA_KEEP_ALIVE"] = "1h"
+    os.environ["GOMEMLIMIT"] = "1800MiB"
+    os.environ["OLLAMA_KEEP_ALIVE"] = "5m"
     if is_ollama_running():
         return
     if shutil.which("ollama") is None:
@@ -668,11 +670,11 @@ def ensure_ollama_alive() -> None:
     ollama_env = dict(os.environ)
     ollama_env.update({
         "GOGC": "50",
-        "GOMEMLIMIT": "2500MiB",
+        "GOMEMLIMIT": "1800MiB",
         "OLLAMA_MAX_LOADED_MODELS": "1",
         "OLLAMA_NUM_PARALLEL": "1",
         "OLLAMA_FLASH_ATTENTION": "1",
-        "OLLAMA_KEEP_ALIVE": "1h",
+        "OLLAMA_KEEP_ALIVE": "5m",
     })
     subprocess.Popen(
         ["ollama", "serve"],
@@ -1663,6 +1665,7 @@ def ensure_ollama_server_and_model(model_tag: str = "gemma2:2b") -> str:
             raise RuntimeError("Ollama binary not found on PATH and automatic installation is unsupported on this platform.")
 
     start_ollama_daemon()
+    unload_ollama_models_from_vram()
 
     model_already_present = False
     try:
@@ -1854,11 +1857,15 @@ def _fetch(url: str) -> str:
         return r.read().decode("utf-8")
 
 
-def load_piqa(split: str = "validation") -> tuple[list[dict[str, Any]], str]:
-    """Load PIQA examples preserving fallback to raw canonical files.
+def load_piqa(
+    split: str = "validation",
+    max_samples: int | None = None,
+) -> tuple[list[dict[str, Any]], str]:
+    """Load PIQA examples preserving fallback to raw canonical files with optional slice limit.
 
     Args:
         split: Dataset split ('train', 'validation', 'test').
+        max_samples: Optional maximum number of examples to materialize in RAM.
 
     Returns:
         tuple[list[dict[str, Any]], str]: Standardized examples and source info.
@@ -1866,21 +1873,35 @@ def load_piqa(split: str = "validation") -> tuple[list[dict[str, Any]], str]:
     if split not in RAW_FILES:
         raise ValueError(f"Unknown split {split!r}; choose from {list(RAW_FILES)}")
 
+    eff_max = int(max_samples) if (max_samples is not None and int(max_samples) > 0) else None
+
     try:
         from datasets import load_dataset  # type: ignore[import-untyped]
 
         ds = load_dataset(DATASET, split=split, trust_remote_code=True)
-        rows = [dict(r) for r in ds]
+        row_iter = itertools.islice(ds, eff_max) if eff_max is not None else ds
+        rows = [dict(r) for r in row_iter]
+        del ds
+        gc.collect()
         source = f"datasets.load_dataset({DATASET!r})"
     except Exception as e:
         LOGGER.info("load_dataset failed (%s: %s); reading raw PIQA files directly.", type(e).__name__, e)
         q_url, l_url = RAW_FILES[split]
-        rows = [json.loads(line) for line in _fetch(q_url).splitlines() if line.strip()]
-        labels = _fetch(l_url).split() if l_url else [-1] * len(rows)
-        if len(labels) != len(rows):
-            raise ValueError(f"{len(rows)} questions but {len(labels)} labels for split {split!r}")
-        for r, lab in zip(rows, labels):
-            r["label"] = int(lab)
+        q_lines = [line for line in _fetch(q_url).splitlines() if line.strip()]
+        labels = _fetch(l_url).split() if l_url else [-1] * len(q_lines)
+        if len(labels) != len(q_lines):
+            raise ValueError(f"{len(q_lines)} questions but {len(labels)} labels for split {split!r}")
+        if eff_max is not None:
+            q_lines = q_lines[:eff_max]
+            labels = labels[:eff_max]
+        rows = []
+        for line, lab in zip(q_lines, labels):
+            r_obj = json.loads(line)
+            r_obj["label"] = int(lab)
+            rows.append(r_obj)
+        del q_lines
+        del labels
+        gc.collect()
         source = "raw files referenced by the ybisk/piqa loading script"
 
     out = [
@@ -1892,6 +1913,8 @@ def load_piqa(split: str = "validation") -> tuple[list[dict[str, Any]], str]:
         }
         for r in rows
     ]
+    del rows
+    gc.collect()
     return out, source
 
 
@@ -1969,28 +1992,33 @@ def dataset_prompt_template(dataset_name: str = "piqa") -> str:
 
 
 def load_benchmark_data(
-    dataset_name: str = "piqa", split: str = "validation"
+    dataset_name: str = "piqa",
+    split: str = "validation",
+    max_samples: int | None = None,
 ) -> tuple[list[dict[str, Any]], str]:
     """Load standardized benchmark examples for PIQA, MMLU, HellaSwag, BoolQ, Battery QA, or TriviaQA.
 
     Args:
         dataset_name: Benchmark name.
         split: Dataset split ('validation', 'test', 'train').
+        max_samples: Optional maximum number of examples to materialize in RAM.
 
     Returns:
         tuple[list[dict[str, Any]], str]: Standardized examples and source info.
     """
     key = dataset_name.lower()
     if key == "piqa":
-        return load_piqa(split)
+        return load_piqa(split, max_samples=max_samples)
 
+    eff_max = int(max_samples) if (max_samples is not None and int(max_samples) > 0) else None
     from datasets import load_dataset  # type: ignore[import-untyped]
 
     if key == "mmlu":
         mmlu_split = "test" if split == "test" else "validation"
         ds = load_dataset("cais/mmlu", "all", split=mmlu_split)
+        row_iter = itertools.islice(ds, eff_max) if eff_max is not None else ds
         out: list[dict[str, Any]] = []
-        for r in ds:
+        for r in row_iter:
             choices = list(r["choices"])
             ans = r.get("answer")
             label = int(ans) if ans is not None and int(ans) in (0, 1, 2, 3) else None
@@ -2002,6 +2030,8 @@ def load_benchmark_data(
                 "sol4": str(choices[3]),
                 "label": label,
             })
+        del ds
+        gc.collect()
         return out, f"datasets.load_dataset('cais/mmlu', 'all', split={mmlu_split!r})"
 
     if key == "hellaswag":
@@ -2011,8 +2041,9 @@ def load_benchmark_data(
         except Exception:
             ds = load_dataset("hellaswag", split=split)
             src = f"datasets.load_dataset('hellaswag', split={split!r})"
+        row_iter = itertools.islice(ds, eff_max) if eff_max is not None else ds
         out = []
-        for r in ds:
+        for r in row_iter:
             endings = list(r["endings"])
             raw_lab = str(r.get("label", "")).strip()
             label = int(raw_lab) if raw_lab in ("0", "1", "2", "3") else None
@@ -2024,12 +2055,15 @@ def load_benchmark_data(
                 "sol4": str(endings[3]),
                 "label": label,
             })
+        del ds
+        gc.collect()
         return out, src
 
     if key == "boolq":
         ds = load_dataset("google/boolq", split=split)
+        row_iter = itertools.islice(ds, eff_max) if eff_max is not None else ds
         out = []
-        for r in ds:
+        for r in row_iter:
             ans = r.get("answer")
             label = int(bool(ans)) if ans is not None else None
             out.append({
@@ -2038,6 +2072,8 @@ def load_benchmark_data(
                 "sol2": "True" if label == 1 else "False",
                 "label": label,
             })
+        del ds
+        gc.collect()
         return out, f"datasets.load_dataset('google/boolq', split={split!r})"
 
     if key in ("battery_qa", "battery-device-data-qa", "battery"):
@@ -2049,6 +2085,8 @@ def load_benchmark_data(
             src = "datasets.load_dataset('batterydata/battery-device-data-qa', split='validation')"
         out = []
         for r in ds:
+            if eff_max is not None and len(out) >= eff_max:
+                break
             if "context" in r and "question" in r:
                 q = str(r.get("question", "")).strip()
                 ctx = str(r.get("context", "")).strip()
@@ -2067,8 +2105,12 @@ def load_benchmark_data(
                 })
             elif "paragraphs" in r:
                 for para in r["paragraphs"]:
+                    if eff_max is not None and len(out) >= eff_max:
+                        break
                     ctx = str(para.get("context", "")).strip()
                     for qa in para.get("qas", []):
+                        if eff_max is not None and len(out) >= eff_max:
+                            break
                         q = str(qa.get("question", "")).strip()
                         answers = qa.get("answers", [])
                         ans_str = str(answers[0].get("text", "")).strip() if answers else "unanswerable"
@@ -2080,6 +2122,8 @@ def load_benchmark_data(
                             "sol2": ans_str,
                             "label": 0,
                         })
+        del ds
+        gc.collect()
         return out, src
 
     if key in ("trivia_qa_verified", "trivia_qa", "trivia"):
@@ -2092,8 +2136,9 @@ def load_benchmark_data(
             ds = load_dataset("ai-safety-institute/trivia_qa_verified", split="validation")
             src = "datasets.load_dataset('ai-safety-institute/trivia_qa_verified', split='validation')"
 
+        row_iter = itertools.islice(ds, eff_max) if eff_max is not None else ds
         out = []
-        for r in ds:
+        for r in row_iter:
             q = str(r.get("question", r.get("goal", ""))).strip()
             ans = r.get("answer")
             ans_str = ""
@@ -2115,6 +2160,8 @@ def load_benchmark_data(
                 "sol2": ans_str,
                 "label": 0,
             })
+        del ds
+        gc.collect()
         return out, src
 
     raise ValueError(f"Unknown dataset {dataset_name!r}; choose from {list(BENCHMARK_DATASETS)}")
@@ -3337,7 +3384,7 @@ def _compute_word2vec_information_prior(
     goal_char_span: tuple[int, int] | None = None,
     content_char_spans: list[tuple[int, int]] | None = None,
 ) -> Any:
-    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.5`).
+    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.7`).
 
     Implements a 100% dataset-agnostic, DRY mathematical prior over arbitrary unseen user prompts
     and datasets without referencing any benchmark ground-truth registry:
@@ -4800,17 +4847,21 @@ def _compact_word2vec_keyed_vectors_in_place(
         if "_" not in s_key and len(s_key) <= 32:
             single_word_indices.append(idx_k)
 
-    sw_vecs = np.ascontiguousarray(old_vecs[single_word_indices], dtype=np.float32)
-    sw_norms = np.linalg.norm(sw_vecs, axis=1).astype(np.float32)
     orig_ranks_map: dict[str, int] = {
         str(old_i2k[idx_k]): int(idx_k) for idx_k in single_word_indices
     }
+    all_norms = np.empty(orig_vocab_len, dtype=np.float32)
+    chunk_step = 50000
+    for c_start in range(0, orig_vocab_len, chunk_step):
+        c_end = min(orig_vocab_len, c_start + chunk_step)
+        all_norms[c_start:c_end] = np.linalg.norm(
+            np.asarray(old_vecs[c_start:c_end], dtype=np.float32),
+            axis=1,
+        )
     orig_norms_map: dict[str, float] = {
-        str(old_i2k[idx_k]): float(sw_norms[pos_i])
-        for pos_i, idx_k in enumerate(single_word_indices)
+        str(old_i2k[idx_k]): float(all_norms[idx_k]) for idx_k in single_word_indices
     }
-    del sw_vecs
-    del sw_norms
+    del all_norms
 
     kept_indices = list(single_word_indices[:max_vocab_size])
     if len(kept_indices) < max_vocab_size:
@@ -4835,6 +4886,7 @@ def _compact_word2vec_keyed_vectors_in_place(
     del old_vecs
     del raw_k2i
     del old_i2k
+    del single_word_indices
 
     wv_model._original_key_to_index = orig_ranks_map
     wv_model._original_key_to_norm = orig_norms_map
@@ -4885,6 +4937,8 @@ def _purge_gensim_disk_cache_after_load(force: bool = False) -> int:
         Path(os.path.expanduser("~/gensim-data")),
         Path("/root/gensim-data"),
         Path("/tmp/gensim-data"),
+        Path(os.path.expanduser("~/.cache/xwhy/embeddings")),
+        Path("/root/.cache/xwhy/embeddings"),
     ]
     seen_dirs: set[str] = set()
     for c_dir in candidate_dirs:
@@ -4897,25 +4951,137 @@ def _purge_gensim_disk_cache_after_load(force: bool = False) -> int:
             seen_dirs.add(res_str)
         except Exception:
             continue
-        for p_item in list(c_dir.rglob("word2vec-google-news-300*")):
-            try:
-                if p_item.is_file():
-                    f_size = p_item.stat().st_size
-                    p_item.unlink()
-                    reclaimed_bytes += f_size
-                elif p_item.is_dir():
-                    for sub_f in p_item.rglob("*"):
-                        if sub_f.is_file():
-                            reclaimed_bytes += sub_f.stat().st_size
-                    shutil.rmtree(p_item, ignore_errors=True)
-            except Exception:
-                pass
+        for pattern in ("word2vec-google-news-300*", "GoogleNews-vectors-negative300*"):
+            for p_item in list(c_dir.rglob(pattern)):
+                try:
+                    if p_item.is_file():
+                        f_size = p_item.stat().st_size
+                        p_item.unlink()
+                        reclaimed_bytes += f_size
+                    elif p_item.is_dir():
+                        for sub_f in p_item.rglob("*"):
+                            if sub_f.is_file():
+                                reclaimed_bytes += sub_f.stat().st_size
+                        shutil.rmtree(p_item, ignore_errors=True)
+                except Exception:
+                    pass
     if reclaimed_bytes > 0:
         LOGGER.info(
             "[Disk Cleanup] Purged temporary Gensim Word2Vec archive files on disk (reclaimed %.1f MB).",
             float(reclaimed_bytes) / (1024 ** 2),
         )
     return reclaimed_bytes
+
+
+def _bind_embedding_wrapper_attributes(emb_wrapper: Any, wv_model: Any) -> Any:
+    """Ensure both `emb_wrapper` and `wv_model` expose `.model`, `.load()`, and fast `.fill_norms()` for `LLMExplainer._initialize`."""
+    if wv_model is not None:
+        try:
+            setattr(wv_model, "model", wv_model)
+        except Exception:
+            pass
+        try:
+            setattr(wv_model, "load", lambda *a, **kw: wv_model)
+        except Exception:
+            pass
+        try:
+            setattr(
+                wv_model,
+                "fill_norms",
+                lambda *a, **kw: getattr(wv_model, "norms", getattr(wv_model, "_retained_vector_norms", None)),
+            )
+        except Exception:
+            pass
+    if emb_wrapper is not None:
+        if wv_model is not None:
+            for attr_n in ("model", "_model", "wv", "keyed_vectors"):
+                if hasattr(emb_wrapper, attr_n) or attr_n == "model":
+                    try:
+                        setattr(emb_wrapper, attr_n, wv_model)
+                    except Exception:
+                        pass
+        try:
+            setattr(emb_wrapper, "load", lambda *a, **kw: wv_model if wv_model is not None else emb_wrapper)
+        except Exception:
+            pass
+    return emb_wrapper if emb_wrapper is not None else wv_model
+
+
+def prewarm_shared_word2vec_embedding_model(
+    embedding_type: EmbeddingType | str = getattr(EmbeddingType, "WORD2VEC", "word2vec"),
+) -> Any:
+    """Pre-load and compact the shared Word2Vec embedding model in-place before starting Ollama models.
+
+    Ensures the 3,000,000-word `word2vec-google-news-300` table (~3.6 GB raw vectors) is
+    loaded, chunk-normed, and compacted down to 120,000 float32 rows (137.3 MB) while 0
+    Ollama model runners are resident in host RAM, and preserves the `Word2VecEmbedding`
+    wrapper contract (`embedder.model` and `embedder.load()`) expected by `LLMExplainer._initialize`.
+
+    Args:
+        embedding_type: Target XWhy EmbeddingType (defaults to WORD2VEC).
+
+    Returns:
+        Any: Compacted shared XWhy embedding wrapper instance exposing `.model` and `.load()`.
+    """
+    global _SHARED_XWHY_EMBEDDING_MODEL
+    if _SHARED_XWHY_EMBEDDING_MODEL is not None:
+        wv_existing = _extract_underlying_wv_model(_SHARED_XWHY_EMBEDDING_MODEL)
+        if wv_existing is not None:
+            if (
+                isinstance(getattr(wv_existing, "key_to_index", None), dict)
+                and len(wv_existing.key_to_index) > 120000
+            ):
+                _compact_word2vec_keyed_vectors_in_place(wv_existing, max_vocab_size=120000)
+                _purge_gensim_disk_cache_after_load(force=True)
+            _bind_embedding_wrapper_attributes(_SHARED_XWHY_EMBEDDING_MODEL, wv_existing)
+        return _SHARED_XWHY_EMBEDDING_MODEL
+
+    resolved_embedding = resolve_enum_or_str(embedding_type, globals().get("EmbeddingType"))
+    loaded_emb = None
+    for mod_name in ("xwhy.models.embeddings.factory", "xwhy.models.embeddings", "xwhy.explainers.llm"):
+        mod_obj = sys.modules.get(mod_name)
+        ef_cls = getattr(mod_obj, "EmbeddingFactory", None) if mod_obj is not None else None
+        if ef_cls is not None and hasattr(ef_cls, "create"):
+            try:
+                loaded_emb = ef_cls.create(resolved_embedding)
+                break
+            except Exception:
+                try:
+                    loaded_emb = ef_cls.create(embedding_type=resolved_embedding)
+                    break
+                except Exception:
+                    pass
+
+    if loaded_emb is None:
+        try:
+            from xwhy.models.embeddings.factory import EmbeddingFactory as _EF
+
+            loaded_emb = _EF.create(resolved_embedding)
+        except Exception as exc:
+            LOGGER.debug("Could not prewarm Word2Vec via EmbeddingFactory: %s", exc)
+            return None
+
+    wv_model = _extract_underlying_wv_model(loaded_emb)
+    if wv_model is None and hasattr(loaded_emb, "load") and callable(loaded_emb.load):
+        try:
+            res_load = loaded_emb.load()
+            wv_model = _extract_underlying_wv_model(loaded_emb) or _extract_underlying_wv_model(res_load)
+        except Exception as exc:
+            LOGGER.debug("Embedding model .load() during prewarm raised: %s", exc)
+
+    if wv_model is not None:
+        _compact_word2vec_keyed_vectors_in_place(wv_model, max_vocab_size=120000)
+        _purge_gensim_disk_cache_after_load(force=True)
+        _SHARED_XWHY_EMBEDDING_MODEL = _bind_embedding_wrapper_attributes(loaded_emb, wv_model)
+
+    gc.collect()
+    try:
+        import ctypes
+
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
+    return _SHARED_XWHY_EMBEDDING_MODEL
 
 
 def create_xwhy_explainer(
@@ -4991,6 +5157,9 @@ def create_xwhy_explainer(
     global _SHARED_XWHY_EMBEDDING_MODEL
 
     if _SHARED_XWHY_EMBEDDING_MODEL is None:
+        prewarm_shared_word2vec_embedding_model(resolved_embedding)
+
+    if _SHARED_XWHY_EMBEDDING_MODEL is None:
         explainer = LLMExplainer(**explainer_params)
         loaded_emb = getattr(getattr(explainer, "state", None), "embedding_model", None)
         if loaded_emb is not None:
@@ -4998,15 +5167,16 @@ def create_xwhy_explainer(
             if wv_model is not None:
                 _compact_word2vec_keyed_vectors_in_place(wv_model, max_vocab_size=120000)
                 _purge_gensim_disk_cache_after_load()
-            try:
-                loaded_emb.load = lambda *a, **kw: loaded_emb
-            except Exception:
-                pass
-            _SHARED_XWHY_EMBEDDING_MODEL = loaded_emb
+                _SHARED_XWHY_EMBEDDING_MODEL = _bind_embedding_wrapper_attributes(loaded_emb, wv_model)
     else:
         wv_existing = _extract_underlying_wv_model(_SHARED_XWHY_EMBEDDING_MODEL)
-        if wv_existing is not None and isinstance(getattr(wv_existing, "key_to_index", None), dict) and len(wv_existing.key_to_index) > 120000:
-            _compact_word2vec_keyed_vectors_in_place(wv_existing, max_vocab_size=120000)
+        if wv_existing is not None:
+            if (
+                isinstance(getattr(wv_existing, "key_to_index", None), dict)
+                and len(wv_existing.key_to_index) > 120000
+            ):
+                _compact_word2vec_keyed_vectors_in_place(wv_existing, max_vocab_size=120000)
+            _bind_embedding_wrapper_attributes(_SHARED_XWHY_EMBEDDING_MODEL, wv_existing)
         patched_factories: list[tuple[Any, Any]] = []
         for mod_name in ("xwhy.models.embeddings.factory", "xwhy.models.embeddings", "xwhy.explainers.llm"):
             mod_obj = sys.modules.get(mod_name)
@@ -5018,18 +5188,14 @@ def create_xwhy_explainer(
         try:
             for ef_cls, _ in patched_factories:
                 ef_cls.create = staticmethod(lambda *a, **kw: _SHARED_XWHY_EMBEDDING_MODEL)  # type: ignore[method-assign]
-            try:
-                _SHARED_XWHY_EMBEDDING_MODEL.load = lambda *a, **kw: _SHARED_XWHY_EMBEDDING_MODEL
-            except Exception:
-                pass
             if orig_cls_load is not None:
                 try:
-                    emb_cls.load = lambda self, *a, **kw: self  # type: ignore[method-assign]
+                    emb_cls.load = lambda self, *a, **kw: wv_existing if wv_existing is not None else self  # type: ignore[method-assign]
                 except Exception:
                     pass
             explainer = LLMExplainer(**explainer_params)
             if hasattr(explainer, "state"):
-                explainer.state.embedding_model = _SHARED_XWHY_EMBEDDING_MODEL
+                explainer.state.embedding_model = wv_existing if wv_existing is not None else _SHARED_XWHY_EMBEDDING_MODEL
         finally:
             for ef_cls, orig_create in patched_factories:
                 ef_cls.create = orig_create
@@ -5038,10 +5204,7 @@ def create_xwhy_explainer(
                     emb_cls.load = orig_cls_load  # type: ignore[method-assign]
                 except Exception:
                     pass
-            try:
-                _SHARED_XWHY_EMBEDDING_MODEL.load = lambda *a, **kw: _SHARED_XWHY_EMBEDDING_MODEL
-            except Exception:
-                pass
+            _bind_embedding_wrapper_attributes(_SHARED_XWHY_EMBEDDING_MODEL, wv_existing)
 
     if "ollama" in prov_str and hasattr(explainer, "state"):
         current_prov = getattr(explainer.state, "provider", None)
@@ -5052,7 +5215,6 @@ def create_xwhy_explainer(
         wrap_provider_with_deterministic_cache(getattr(explainer.state, "provider", None))
 
     return explainer
-
 
 # ============================================================================
 # CATEGORY 7: Scoped Perturbation & Template Freezing Engine (Hierarchical Attribution)
@@ -9634,7 +9796,7 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.5"
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.7"
 
 
 def compute_experiment_fingerprint(
@@ -9666,7 +9828,7 @@ def compute_experiment_fingerprint(
         seed: Random seed governing perturbations.
         num_perturbations: Number of perturbations configured for the run.
         importance_words: Optional list of extracted importance words.
-        schema_version: Pipeline checkpoint schema version ('4.3.5').
+        schema_version: Pipeline checkpoint schema version ('4.3.7').
 
     Returns:
         str: Hexadecimal SHA-256 experiment fingerprint.
@@ -10896,11 +11058,18 @@ def run_pipeline(
     )
     LOGGER.info("Split: %s | Max examples per dataset: %d", split, max_examples_per_dataset)
 
+    LOGGER.info("Pre-warming and compacting shared Word2Vec embedding model before loading datasets/models...")
+    prewarm_shared_word2vec_embedding_model()
+
     loaded_datasets: dict[str, list[dict[str, Any]]] = {}
     for ds_name in benchmarks:
         LOGGER.info("Loading benchmark dataset '%s' (split: %s)...", ds_name, split)
         try:
-            exs, src_desc = load_benchmark_data(ds_name, split=split)
+            exs, src_desc = load_benchmark_data(
+                ds_name,
+                split=split,
+                max_samples=max_examples_per_dataset,
+            )
             selected_exs = exs[:max_examples_per_dataset]
             loaded_datasets[ds_name] = selected_exs
             LOGGER.info("Loaded %d examples for '%s' from %s", len(selected_exs), ds_name, src_desc)
@@ -11051,7 +11220,7 @@ def run_pipeline(
 
         if "ollama" in prov_val.lower():
             unload_ollama_models_from_vram()
-            gc.collect()
+        _reclaim_sample_memory(log_memory=True)
 
     eval_dir = PATHS.output_dir / "evaluation"
     eval_dir.mkdir(parents=True, exist_ok=True)
