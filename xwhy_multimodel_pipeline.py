@@ -1,4 +1,4 @@
-"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.4`).
+"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.5`).
 
 Automated Perturbation-Based Explainability & Verification Pipeline:
 - Executes the XWhy (CD-SMILE) perturbation-based explainability method across active
@@ -42,6 +42,7 @@ Supported Perturbation Scoping Modes (Enum or String):
 """
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 import gc
@@ -503,19 +504,21 @@ except ImportError:
 
 
 class SupportedModel(str, Enum):
-    """Supported open-weight models for local Ollama and Hugging Face execution.
-
-    Attributes:
-        GEMMA_2_2B: Google Gemma 2 2B open-weight model (`google/gemma-2-2b`).
-        GEMMA_3_4B_IT: Google Gemma 3 4B instruction-tuned model (`google/gemma-3-4b-it`).
-        QWEN_3_4B: Alibaba Qwen 3 4B model (`Qwen/Qwen3-4B`).
-        QWEN_3_1_7B: Alibaba Qwen 3 1.7B model (`Qwen/Qwen3-1.7B`).
-    """
+    """Supported open-weight models for local Ollama and Hugging Face execution."""
 
     GEMMA_2_2B = "google/gemma-2-2b"
     GEMMA_3_4B_IT = "google/gemma-3-4b-it"
+    GEMMA_4_E2B_IT = "google/gemma-4-E2B-it"
+    GEMMA_4_E4B_IT = "google/gemma-4-E4B-it"
+    LLAMA_3_2_1B = "meta-llama/Llama-3.2-1B"
+    LLAMA_3_2_3B = "meta-llama/Llama-3.2-3B"
+    LLAMA_3_1_8B = "meta-llama/Llama-3.1-8B"
     QWEN_3_4B = "Qwen/Qwen3-4B"
     QWEN_3_1_7B = "Qwen/Qwen3-1.7B"
+    QWEN_3_8B = "Qwen/Qwen3-8B"
+    QWEN_2_5_1_5B_IT = "Qwen/Qwen2.5-1.5B-Instruct"
+    QWEN_2_5_3B_IT = "Qwen/Qwen2.5-3B-Instruct"
+    PHI_3_MINI = "microsoft/Phi-3-mini-4k-instruct"
 
 
 @dataclass(frozen=True)
@@ -538,11 +541,38 @@ OPEN_WEIGHT_MODEL_REGISTRY: Final[dict[str, OpenWeightModelSpec]] = {
     SupportedModel.GEMMA_3_4B_IT.value: OpenWeightModelSpec(
         "google/gemma-3-4b-it", "gemma3:4b"
     ),
+    SupportedModel.GEMMA_4_E2B_IT.value: OpenWeightModelSpec(
+        "google/gemma-4-E2B-it", "gemma4:e2b"
+    ),
+    SupportedModel.GEMMA_4_E4B_IT.value: OpenWeightModelSpec(
+        "google/gemma-4-E4B-it", "gemma4:e4b"
+    ),
+    SupportedModel.LLAMA_3_2_1B.value: OpenWeightModelSpec(
+        "meta-llama/Llama-3.2-1B", "llama3.2:1b"
+    ),
+    SupportedModel.LLAMA_3_2_3B.value: OpenWeightModelSpec(
+        "meta-llama/Llama-3.2-3B", "llama3.2:3b"
+    ),
+    SupportedModel.LLAMA_3_1_8B.value: OpenWeightModelSpec(
+        "meta-llama/Llama-3.1-8B", "llama3.1:8b"
+    ),
     SupportedModel.QWEN_3_4B.value: OpenWeightModelSpec(
         "Qwen/Qwen3-4B", "qwen3:4b"
     ),
     SupportedModel.QWEN_3_1_7B.value: OpenWeightModelSpec(
         "Qwen/Qwen3-1.7B", "qwen3:1.7b"
+    ),
+    SupportedModel.QWEN_3_8B.value: OpenWeightModelSpec(
+        "Qwen/Qwen3-8B", "qwen3:8b"
+    ),
+    SupportedModel.QWEN_2_5_1_5B_IT.value: OpenWeightModelSpec(
+        "Qwen/Qwen2.5-1.5B-Instruct", "qwen2.5:1.5b"
+    ),
+    SupportedModel.QWEN_2_5_3B_IT.value: OpenWeightModelSpec(
+        "Qwen/Qwen2.5-3B-Instruct", "qwen2.5:3b"
+    ),
+    SupportedModel.PHI_3_MINI.value: OpenWeightModelSpec(
+        "microsoft/Phi-3-mini-4k-instruct", "phi3:mini"
     ),
 }
 
@@ -2266,6 +2296,16 @@ def resolve_provider_api_key(provider: ProviderType | str) -> str | None:
     return key.strip()
 
 
+CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS: Final[float] = 60.0
+CLOUD_RATE_LIMITED_PROVIDERS: Final[frozenset[str]] = frozenset({"anthropic", "openai", "gemini"})
+
+
+def is_cloud_rate_limited_provider(provider: ProviderType | str) -> bool:
+    """Return True if the provider is a cloud API provider (Anthropic, OpenAI, or Gemini) requiring per-sample delay."""
+    prov_norm = enum_to_str(provider).lower()
+    return any(cloud_p in prov_norm for cloud_p in CLOUD_RATE_LIMITED_PROVIDERS)
+
+
 # Hyperparameters aligned with XWhy standard explainability configuration
 TEMPERATURE: Final[float] = 0.0
 MAX_RETRIES: Final[int] = 7
@@ -3297,7 +3337,7 @@ def _compute_word2vec_information_prior(
     goal_char_span: tuple[int, int] | None = None,
     content_char_spans: list[tuple[int, int]] | None = None,
 ) -> Any:
-    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.4`).
+    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.5`).
 
     Implements a 100% dataset-agnostic, DRY mathematical prior over arbitrary unseen user prompts
     and datasets without referencing any benchmark ground-truth registry:
@@ -6372,37 +6412,537 @@ def direct_scoped_explain(
     )
 
 # ============================================================================
-# CATEGORY 8: Manually Defined Ground Truth Registry & Token Alignment
+# CATEGORY 8: Automated Ground Truth Generation Engine, Registry & Token Alignment
 # ============================================================================
 
 # ============================================================================
-# NOTE [GROUND TRUTH & ACCURACY METRIC SCOPING ARCHITECTURE]:
-# - Tri-Mode Ground Truth Resolution:
-#   1. When mode=PerturbationMode.GOAL (legacy enable_scoped_perturbation=True):
-#      - Method: Hierarchical Scoped Perturbation (freezes template, perturbs target goal).
-#      - Ground Truth: Evaluates accuracy and Token AUC specifically against the target goal tokens.
-#      - Target Fields: Uses `ori_exp`, `truth`, `tokens`, and `category` from DEFAULT_GROUND_TRUTH_DATA.
-#   2. When mode=PerturbationMode.FULL_PROMPT (legacy enable_scoped_perturbation=False):
-#      - Method: Standard Unconstrained Full Prompt Perturbation.
-#      - Ground Truth: Evaluates accuracy and Token AUC against the entire formatted prompt.
-#      - Target Fields: Uses `full_prompt`, `full_tokens`, `full_truth`, and `category` from DEFAULT_GROUND_TRUTH_DATA.
-#   3. When mode=PerturbationMode.IMPORTANCE_WORDS:
-#      - Method: Model-Guided Keyword Hierarchical Perturbation.
-#      - Ground Truth: Dynamically aligns model-extracted importance keywords with the ground-truth
-#        relevance labels from `full_truth` (or content-word baseline), providing dedicated dynamic
-#        ground-truth annotations for accuracy and Token AUC.
-# - Design & SOLID Principles:
-#   - Single Responsibility: GroundTruthAnnotation encapsulates benchmark ground truth and
-#     provides dedicated views via `for_scope(mode)`.
-#   - Open-Closed Principle: GroundTruthRegistry and get_or_create_ground_truth dynamically
-#     resolve either scoped, full-prompt, or importance-words ground truth annotations without altering
-#     the core token AUC or classification accuracy evaluation functions.
+# NOTE [AUTOMATED GROUND TRUTH GENERATION & TRI-MODE SCOPING ARCHITECTURE]:
+# - Automated Ground Truth Extraction (strictly isolated to post-hoc evaluation):
+#   1. Scoped / Hierarchical Mode (PerturbationMode.GOAL):
+#      - Ground truth defined strictly on the focal target scope ('goal') via
+#        ScopedGoalStrategy (labels content words as 1, stopwords as 0).
+#   2. Unscoped / Full Prompt Mode (PerturbationMode.FULL_PROMPT):
+#      - Ground truth defined over the complete formatted prompt via TokenSpanMapper
+#        and ContentWordsStrategy (or GoalFocusedStrategy / TargetAndAnswerStrategy),
+#        labeling template boilerplate and stopwords as 0 and content words in data
+#        fields as 1.
+#   3. Importance Words Mode (PerturbationMode.IMPORTANCE_WORDS):
+#      - Dynamically projects full-prompt or goal ground-truth relevance labels onto
+#        the model-extracted importance tokens.
 # ============================================================================
+
+STOPWORDS: Final[set[str]] = {
+    "a", "an", "the", "in", "on", "at", "to", "for", "of", "with", "by", "from",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had",
+    "do", "does", "did", "can", "could", "will", "would", "shall", "should", "may", "might", "must",
+    "it", "its", "this", "that", "these", "those", "which", "what", "who", "whom", "whose", "why", "how",
+    "and", "or", "but", "if", "then", "else", "when", "where", "as", "than", "so",
+}
+
+
+def normalize_token(token: str) -> str:
+    """Normalize a token by stripping leading/trailing non-alphanumeric characters and lowercasing."""
+    return re.sub(r"^[\W_]+|[\W_]+$", "", str(token), flags=re.UNICODE).lower()
+
+
+_normalize_token = normalize_token
+
+
+def is_content_token(token: str) -> bool:
+    """Determine whether a token constitutes a salient content word (non-stopword, length > 2)."""
+    normalized = normalize_token(token)
+    return len(normalized) > 2 and normalized not in STOPWORDS
+
+
+class TokenRole(str, Enum):
+    """Semantic origin of a token within the formatted benchmark prompt."""
+
+    TEMPLATE_BOILERPLATE = "template_boilerplate"
+    GOAL = "goal"
+    SOL1 = "sol1"
+    SOL2 = "sol2"
+    SOL3 = "sol3"
+    SOL4 = "sol4"
+    CONTEXT = "context"
+    OTHER = "other"
+
+
+@dataclass(frozen=True)
+class TokenMetadata:
+    """Metadata describing a whitespace token within the full prompt text.
+
+    Attributes:
+        token: Exact whitespace token string as processed by the explainer.
+        start: Character start index in prompt text.
+        end: Character end index in prompt text.
+        index: Sequential token position index (0-indexed).
+        role: Identified semantic role (e.g. 'template_boilerplate', 'goal', 'sol1').
+        is_content: Whether the token is a lexical content word.
+    """
+
+    token: str
+    start: int
+    end: int
+    index: int
+    role: str
+    is_content: bool
+
+
+class TokenSpanMapper:
+    """Maps whitespace-separated tokens of a formatted prompt to template character spans."""
+
+    @staticmethod
+    def map_prompt_tokens(prompt_text: str, spans: dict[str, tuple[int, int]]) -> list[TokenMetadata]:
+        """Align each whitespace-separated token to its corresponding prompt field span.
+
+        Args:
+            prompt_text: Full formatted prompt string.
+            spans: Mapping of field names to (start_char, end_char) ranges.
+
+        Returns:
+            list[TokenMetadata]: List of metadata objects for each token in prompt_text.split().
+        """
+        tokens_metadata: list[TokenMetadata] = []
+        for idx, match in enumerate(re.finditer(r"\S+", prompt_text)):
+            tok = match.group()
+            start, end = match.start(), match.end()
+
+            role = TokenRole.TEMPLATE_BOILERPLATE.value
+            for field_name, (f_start, f_end) in spans.items():
+                if not (end <= f_start or start >= f_end):
+                    role = field_name
+                    break
+
+            tokens_metadata.append(
+                TokenMetadata(
+                    token=tok,
+                    start=start,
+                    end=end,
+                    index=idx,
+                    role=role,
+                    is_content=is_content_token(tok),
+                )
+            )
+
+        return tokens_metadata
+
+
+class BaseGroundTruthStrategy(ABC):
+    """Abstract strategy defining binary ground-truth label assignment rules."""
+
+    @abstractmethod
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        """Generate binary labels (1=relevant, 0=irrelevant) for tokens.
+
+        Args:
+            tokens_meta: List of token metadata objects.
+            example: Raw dataset example dictionary containing labels and fields.
+
+        Returns:
+            list[int]: Binary labels corresponding 1-to-1 with tokens_meta.
+        """
+        pass
+
+    @staticmethod
+    def ensure_binary_variance(truth: list[int]) -> list[int]:
+        """Guarantee binary label diversity to prevent single-class zero-variance exceptions in ROC AUC."""
+        if not truth:
+            return truth
+        adjusted = list(truth)
+        if sum(adjusted) == 0:
+            adjusted[0] = 1
+        elif sum(adjusted) == len(adjusted) and len(adjusted) > 1:
+            adjusted[0] = 0
+        return adjusted
+
+
+class ContentWordsStrategy(BaseGroundTruthStrategy):
+    """Default Full-Prompt Strategy: Labels all content words across problem fields as 1.
+
+    Template boilerplate (instructions, formatting labels) and stopwords are strictly 0.
+    """
+
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        truth: list[int] = []
+        for meta in tokens_meta:
+            if meta.role == TokenRole.TEMPLATE_BOILERPLATE.value:
+                truth.append(0)
+            elif meta.is_content:
+                truth.append(1)
+            else:
+                truth.append(0)
+        return self.ensure_binary_variance(truth)
+
+
+class GoalFocusedStrategy(BaseGroundTruthStrategy):
+    """Goal-Focused Strategy: Labels only content words within 'goal' as 1.
+
+    All template boilerplate, options, and candidate solutions are labeled 0.
+    """
+
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        truth: list[int] = []
+        for meta in tokens_meta:
+            if meta.role == TokenRole.GOAL.value and meta.is_content:
+                truth.append(1)
+            else:
+                truth.append(0)
+        return self.ensure_binary_variance(truth)
+
+
+class TargetAndAnswerStrategy(BaseGroundTruthStrategy):
+    """Target-and-Answer Strategy: Labels content words in 'goal' and the correct answer option as 1.
+
+    Template boilerplate, stopwords, and distractor options are labeled 0.
+    """
+
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        label_idx = example.get("label")
+        target_sol_field: str | None = None
+        if isinstance(label_idx, int) and label_idx in (0, 1, 2, 3):
+            target_sol_field = f"sol{label_idx + 1}"
+
+        truth: list[int] = []
+        for meta in tokens_meta:
+            if meta.role == TokenRole.TEMPLATE_BOILERPLATE.value:
+                truth.append(0)
+            elif meta.role == TokenRole.GOAL.value and meta.is_content:
+                truth.append(1)
+            elif target_sol_field and meta.role == target_sol_field and meta.is_content:
+                truth.append(1)
+            else:
+                truth.append(0)
+        return self.ensure_binary_variance(truth)
+
+
+class ScopedGoalStrategy(BaseGroundTruthStrategy):
+    """Scoped Strategy: Labels content words within the focal target string as 1, stopwords as 0."""
+
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        truth = [1 if meta.is_content else 0 for meta in tokens_meta]
+        return self.ensure_binary_variance(truth)
+
+
+def resolve_labeling_strategy(
+    strategy: str | BaseGroundTruthStrategy = "content_words",
+) -> BaseGroundTruthStrategy:
+    """Factory resolver for full-prompt labeling strategies."""
+    if isinstance(strategy, BaseGroundTruthStrategy):
+        return strategy
+
+    strategy_name = str(strategy).lower().strip()
+    if strategy_name in ("content_words", "content", "all_content"):
+        return ContentWordsStrategy()
+    if strategy_name in ("goal_focused", "goal", "scoped_in_full"):
+        return GoalFocusedStrategy()
+    if strategy_name in ("target_and_answer", "goal_and_answer", "answer"):
+        return TargetAndAnswerStrategy()
+
+    raise ValueError(
+        f"Unknown ground-truth strategy '{strategy}'. "
+        "Supported: 'content_words', 'goal_focused', 'target_and_answer'."
+    )
+
+
+@dataclass
+class SampleGroundTruthRecord:
+    """Consolidated ground-truth annotations for both scoped and full prompt modes.
+
+    Attributes:
+        dataset_key: Dataset identifier ('battery_qa', 'piqa', etc.).
+        sample_id: Sample identifier ('validation_0000', etc.).
+        goal_text: Raw focal target text ('goal').
+        goal_tokens: Whitespace tokens of the focal target text.
+        goal_truth: Binary ground-truth labels for goal_tokens (scoped mode).
+        full_prompt_text: Full formatted prompt text.
+        full_prompt_tokens: Whitespace tokens of the full prompt text.
+        full_prompt_truth: Binary ground-truth labels for full_prompt_tokens (unscoped mode).
+        full_prompt_roles: Semantic roles of each full prompt token.
+        spans: Character spans of variable fields in the prompt.
+        example: Original raw dataset sample record.
+    """
+
+    dataset_key: str
+    sample_id: str
+    goal_text: str
+    goal_tokens: list[str]
+    goal_truth: list[int]
+    full_prompt_text: str
+    full_prompt_tokens: list[str]
+    full_prompt_truth: list[int]
+    full_prompt_roles: list[str]
+    spans: dict[str, tuple[int, int]]
+    example: dict[str, Any]
+
+
+class GroundTruthExtractor:
+    """Extracts and generates paired scoped and full-prompt ground-truth annotations."""
+
+    def __init__(
+        self,
+        full_prompt_strategy: str | BaseGroundTruthStrategy = "content_words",
+    ) -> None:
+        self.full_prompt_strategy = resolve_labeling_strategy(full_prompt_strategy)
+        self.scoped_strategy = ScopedGoalStrategy()
+
+    def process_sample(
+        self,
+        example: dict[str, Any],
+        dataset_name: str,
+        sample_id: str,
+    ) -> SampleGroundTruthRecord:
+        """Process a single sample, generating both scoped and full-prompt ground truths."""
+        try:
+            prompt_text, spans = build_benchmark_prompt(example, dataset_name)
+        except Exception:
+            goal_fallback = str(example.get("goal", "")).strip()
+            prompt_text = goal_fallback
+            spans = {"goal": (0, len(goal_fallback))} if goal_fallback else {}
+
+        target_text = str(example.get("goal", "")).strip() or prompt_text
+
+        goal_tokens = target_text.split()
+        dummy_goal_meta = [
+            TokenMetadata(
+                token=t,
+                start=0,
+                end=0,
+                index=i,
+                role=TokenRole.GOAL.value,
+                is_content=is_content_token(t),
+            )
+            for i, t in enumerate(goal_tokens)
+        ]
+        goal_truth = self.scoped_strategy.label_tokens(dummy_goal_meta, example)
+
+        full_tokens_meta = TokenSpanMapper.map_prompt_tokens(prompt_text, spans)
+        full_prompt_tokens = [m.token for m in full_tokens_meta]
+        full_prompt_roles = [m.role for m in full_tokens_meta]
+        full_prompt_truth = self.full_prompt_strategy.label_tokens(full_tokens_meta, example)
+
+        return SampleGroundTruthRecord(
+            dataset_key=dataset_name,
+            sample_id=sample_id,
+            goal_text=target_text,
+            goal_tokens=goal_tokens,
+            goal_truth=goal_truth,
+            full_prompt_text=prompt_text,
+            full_prompt_tokens=full_prompt_tokens,
+            full_prompt_truth=full_prompt_truth,
+            full_prompt_roles=full_prompt_roles,
+            spans=spans,
+            example=example,
+        )
+
+
+class GroundTruthResult(dict):
+    """Container holding scoped, full-prompt, and unified ground-truth dictionaries.
+
+    Supports direct dictionary access (result['scoped'], result['full_prompt'], result['unified'])
+    as well as dataset-level access (result['piqa']) for backward compatibility.
+    """
+
+    def __init__(
+        self,
+        scoped: dict[str, dict[str, dict[str, Any]]],
+        full_prompt: dict[str, dict[str, dict[str, Any]]],
+        unified: dict[str, dict[str, dict[str, Any]]],
+    ) -> None:
+        super().__init__()
+        self["scoped"] = scoped
+        self["full_prompt"] = full_prompt
+        self["unified"] = unified
+        for ds_name, data in unified.items():
+            self[ds_name] = data
+
+    @property
+    def scoped(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Ground truth annotations for scoped / hierarchical mode."""
+        return self["scoped"]
+
+    @property
+    def full_prompt(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Ground truth annotations for full prompt / unscoped mode."""
+        return self["full_prompt"]
+
+    @property
+    def unified(self) -> dict[str, dict[str, dict[str, Any]]]:
+        """Unified annotations containing both scoped and full prompt data per sample."""
+        return self["unified"]
+
+
+OFFLINE_FALLBACK_SAMPLES: Final[dict[str, list[dict[str, Any]]]] = {
+    "battery_qa": [
+        {
+            "goal": "What is the cathode?",
+            "sol1": "Lithium iron phosphate serves as the cathode material in LFP lithium-ion battery cells.",
+            "sol2": "Lithium iron phosphate",
+            "label": 0,
+        },
+        {
+            "goal": "What is the anode?",
+            "sol1": "Graphite carbon is commonly utilized as the anode material in commercial rechargeable batteries.",
+            "sol2": "Graphite carbon",
+            "label": 0,
+        },
+    ],
+    "piqa": [
+        {
+            "goal": "How do I ready a guinea pig cage for it's new occupants?",
+            "sol1": "clean the cage thoroughly with mild vinegar solution and water before bedding.",
+            "sol2": "spray concentrated bleach inside the enclosure and leave it soaking wet.",
+            "label": 0,
+        },
+        {
+            "goal": "dresser",
+            "sol1": "organize clothing into separate sliding wooden drawers.",
+            "sol2": "use the dresser as a kitchen frying pan.",
+            "label": 0,
+        },
+    ],
+    "trivia_qa_verified": [
+        {
+            "goal": "Mimi is the heroine of which opera?",
+            "sol1": "",
+            "sol2": "La Boheme",
+            "label": 0,
+        },
+        {
+            "goal": "How many pints are there in a gallon?",
+            "sol1": "",
+            "sol2": "8",
+            "label": 0,
+        },
+    ],
+    "mmlu": [
+        {
+            "goal": "The cyclic subgroup of Z_24 generated by 18 has order",
+            "sol1": "4",
+            "sol2": "6",
+            "sol3": "8",
+            "sol4": "12",
+            "label": 0,
+        },
+    ],
+    "hellaswag": [
+        {
+            "goal": "A man is sitting on a roof. he",
+            "sol1": "replaces loose asphalt shingles with a hammer and nails.",
+            "sol2": "flies directly into space without a spacecraft.",
+            "sol3": "swims across the deep blue ocean water.",
+            "sol4": "eats a ceramic plate on the dining table.",
+            "label": 0,
+        },
+    ],
+    "boolq": [
+        {
+            "goal": "does ethanol take more energy make that produces",
+            "sol1": "Studies on corn ethanol energy balance indicate a positive net energy ratio under modern biorefinery processes.",
+            "sol2": "False",
+            "label": 0,
+        },
+    ],
+}
+
+
+def inspect_and_generate_ground_truth(
+    datasets: list[str] | None = None,
+    split: str = "validation",
+    num_samples: int = 10,
+    full_prompt_strategy: str | BaseGroundTruthStrategy = "content_words",
+    print_inspection: bool = False,
+    print_copyable: bool = False,
+) -> GroundTruthResult:
+    """Inspect benchmark samples and generate ground-truth data for both scoped and full prompt modes.
+
+    Args:
+        datasets: List of benchmark dataset names. If None, runs across all 6 supported benchmarks.
+        split: Dataset split to fetch ('validation', 'test', 'train').
+        num_samples: Maximum number of samples to process per dataset.
+        full_prompt_strategy: Labeling strategy for full prompt tokens
+            ('content_words', 'goal_focused', 'target_and_answer').
+        print_inspection: Kept for signature compatibility (quiet execution).
+        print_copyable: Kept for signature compatibility (quiet execution).
+
+    Returns:
+        GroundTruthResult: Container with 'scoped', 'full_prompt', and 'unified' dictionary mappings.
+    """
+    _ = (print_inspection, print_copyable)
+    target_datasets = datasets or [
+        "battery_qa",
+        "piqa",
+        "trivia_qa_verified",
+        "mmlu",
+        "hellaswag",
+        "boolq",
+    ]
+
+    extractor = GroundTruthExtractor(full_prompt_strategy=full_prompt_strategy)
+
+    scoped_output: dict[str, dict[str, dict[str, Any]]] = {}
+    full_output: dict[str, dict[str, dict[str, Any]]] = {}
+    unified_output: dict[str, dict[str, dict[str, Any]]] = {}
+
+    for ds_name in target_datasets:
+        examples: list[dict[str, Any]] = []
+        try:
+            examples, _ = load_benchmark_data(dataset_name=ds_name, split=split)
+        except Exception as err:
+            if ds_name in OFFLINE_FALLBACK_SAMPLES:
+                examples = OFFLINE_FALLBACK_SAMPLES[ds_name]
+            else:
+                LOGGER.debug("Failed to load %s for ground truth generation: %s", ds_name, err)
+                continue
+
+        samples_to_take = min(num_samples, len(examples))
+        scoped_output[ds_name] = {}
+        full_output[ds_name] = {}
+        unified_output[ds_name] = {}
+
+        for idx in range(samples_to_take):
+            ex = examples[idx]
+            sample_id = f"{split}_{idx:04d}"
+
+            record = extractor.process_sample(
+                example=ex,
+                dataset_name=ds_name,
+                sample_id=sample_id,
+            )
+
+            scoped_output[ds_name][sample_id] = {
+                "ori_exp": record.goal_text,
+                "tokens": record.goal_tokens,
+                "truth": record.goal_truth,
+                "category": f"{ds_name}_scoped_goal",
+            }
+
+            full_output[ds_name][sample_id] = {
+                "ori_exp": record.full_prompt_text,
+                "tokens": record.full_prompt_tokens,
+                "truth": record.full_prompt_truth,
+                "category": f"{ds_name}_full_prompt",
+            }
+
+            unified_output[ds_name][sample_id] = {
+                "ori_exp": record.goal_text,
+                "truth": record.goal_truth,
+                "tokens": record.goal_tokens,
+                "category": f"{ds_name}_target",
+                "full_prompt": record.full_prompt_text,
+                "full_tokens": record.full_prompt_tokens,
+                "full_truth": record.full_prompt_truth,
+            }
+
+    return GroundTruthResult(
+        scoped=scoped_output,
+        full_prompt=full_output,
+        unified=unified_output,
+    )
 
 
 @dataclass
 class GroundTruthAnnotation:
-    """Manually defined ground-truth annotation for a single dataset sample.
+    """Ground-truth annotation for a single dataset sample.
 
     Supports scoped (goal), unconstrained (full prompt), and dynamic (importance words)
     ground-truth representations aligned with the active perturbation mode.
@@ -6514,7 +7054,7 @@ class GroundTruthAnnotation:
         """Project registered ground-truth labels onto the model-selected importance tokens.
 
         Maps each selected token to its registered binary label in `self.full_truth`
-        (or `self.truth` when `full_truth` is empty) without length-based heuristics.
+        (or `self.truth` when `full_truth` is empty).
 
         Args:
             importance_tokens: List of tokens selected as important by the model.
@@ -6602,583 +7142,50 @@ class GroundTruthAnnotation:
         return self.get_full_prompt_annotation()
 
 
-DEFAULT_GROUND_TRUTH_DATA: Final[dict[str, dict[str, dict[str, Any]]]] = {
-    "battery_qa": {
-        "validation_0000": {
-            "ori_exp": "What is the cathode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nThe blended slurry was then cast onto a clean current collector (Al foil for the cathode and Cu foil for the anode) and dried at 90 °C under vacuum overnight.\n\nQuestion:\nWhat is the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'The', 'blended', 'slurry', 'was', 'then', 'cast', 'onto', 'a', 'clean', 'current', 'collector', '(Al', 'foil', 'for', 'the', 'cathode', 'and', 'Cu', 'foil', 'for', 'the', 'anode)', 'and', 'dried', 'at', '90', '°C', 'under', 'vacuum', 'overnight.', 'Question:', 'What', 'is', 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0001": {
-            "ori_exp": "What is the anode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'anode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nThe blended slurry was then cast onto a clean current collector (Al foil for the cathode and Cu foil for the anode) and dried at 90 °C under vacuum overnight. Finally, the obtained electrodes were cut into desired shapes on demand. It should be noted that the electrode mass ratio of cathode/anode is set to about 4, thus achieving the battery balance.\n\nQuestion:\nWhat is the anode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'The', 'blended', 'slurry', 'was', 'then', 'cast', 'onto', 'a', 'clean', 'current', 'collector', '(Al', 'foil', 'for', 'the', 'cathode', 'and', 'Cu', 'foil', 'for', 'the', 'anode)', 'and', 'dried', 'at', '90', '°C', 'under', 'vacuum', 'overnight.', 'Finally,', 'the', 'obtained', 'electrodes', 'were', 'cut', 'into', 'desired', 'shapes', 'on', 'demand.', 'It', 'should', 'be', 'noted', 'that', 'the', 'electrode', 'mass', 'ratio', 'of', 'cathode/anode', 'is', 'set', 'to', 'about', '4,', 'thus', 'achieving', 'the', 'battery', 'balance.', 'Question:', 'What', 'is', 'the', 'anode?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0002": {
-            "ori_exp": "What is the cathode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nIn conclusion, the SiC/RGO nanocomposite, integrating the synergistic effect of SiC flakes and RGO, was synthesized by an in situ gas–solid fabrication method. Taking advantage of the enhanced photogenerated charge separation, large CO2 adsorption, and numerous exposed active sites, SiC/RGO nanocomposite served as the cathode material for the photo-assisted Li–CO2 battery.\n\nQuestion:\nWhat is the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'In', 'conclusion,', 'the', 'SiC/RGO', 'nanocomposite,', 'integrating', 'the', 'synergistic', 'effect', 'of', 'SiC', 'flakes', 'and', 'RGO,', 'was', 'synthesized', 'by', 'an', 'in', 'situ', 'gas–solid', 'fabrication', 'method.', 'Taking', 'advantage', 'of', 'the', 'enhanced', 'photogenerated', 'charge', 'separation,', 'large', 'CO2', 'adsorption,', 'and', 'numerous', 'exposed', 'active', 'sites,', 'SiC/RGO', 'nanocomposite', 'served', 'as', 'the', 'cathode', 'material', 'for', 'the', 'photo-assisted', 'Li–CO2', 'battery.', 'Question:', 'What', 'is', 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0003": {
-            "ori_exp": "What is the cathode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nThe calculated diffusion coefficient of Zn2+ was of the order of 10−9–10−10 cm−2 s−1 (Fig. 4f), which is comparable to that of the reported V-based materials (Table S3†). These results clearly demonstrate that the NV NSs@ACC cathode allows the stable and fast migration of Zn2+, leading to good rate capability.\n\nQuestion:\nWhat is the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'The', 'calculated', 'diffusion', 'coefficient', 'of', 'Zn2+', 'was', 'of', 'the', 'order', 'of', '10−9–10−10', 'cm−2', 's−1', '(Fig.', '4f),', 'which', 'is', 'comparable', 'to', 'that', 'of', 'the', 'reported', 'V-based', 'materials', '(Table', 'S3†).', 'These', 'results', 'clearly', 'demonstrate', 'that', 'the', 'NV', 'NSs@ACC', 'cathode', 'allows', 'the', 'stable', 'and', 'fast', 'migration', 'of', 'Zn2+,', 'leading', 'to', 'good', 'rate', 'capability.', 'Question:', 'What', 'is', 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0004": {
-            "ori_exp": "What is the cathode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nLi-ion batteries (LIBs) are expected to have a cell-level specific capacity of >350 W h kg−1 by 2025 to meet the market demanded driving range of an electric vehicle (EV). Among the state-of-the-art cathode materials, Ni-rich layered oxides, LiNixCoyAlzO2 (NCA) and LiNixCoyMnzO2 (NCM) with x + y + z = 1 and x ≧ 0.8, have an unbeatable high capacity of ∼200 mA h g−1.\n\nQuestion:\nWhat is the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Li-ion', 'batteries', '(LIBs)', 'are', 'expected', 'to', 'have', 'a', 'cell-level', 'specific', 'capacity', 'of', '>350', 'W', 'h', 'kg−1', 'by', '2025', 'to', 'meet', 'the', 'market', 'demanded', 'driving', 'range', 'of', 'an', 'electric', 'vehicle', '(EV).', 'Among', 'the', 'state-of-the-art', 'cathode', 'materials,', 'Ni-rich', 'layered', 'oxides,', 'LiNixCoyAlzO2', '(NCA)', 'and', 'LiNixCoyMnzO2', '(NCM)', 'with', 'x', '+', 'y', '+', 'z', '=', '1', 'and', 'x', '≧', '0.8,', 'have', 'an', 'unbeatable', 'high', 'capacity', 'of', '∼200', 'mA', 'h', 'g−1.', 'Question:', 'What', 'is', 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "What is the cathode?",
-            "truth": [0, 0, 0, 1],
-            "tokens": ['What', 'is', 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nMg-doped P2-NMM10 and Zn-doped P2-NMZ10 cathode materials are synthesized by a solid state method, whose P2-type layered structures are confirmed by X-ray diffraction (XRD) (Fig. S1† and a summary of the crystallographic data is given in Tables S1–S4†). Their compositions are verified by energy dispersive X-ray spectroscopy (EDS) (Fig. S2†), showing that all the dopants are successfully introduced into the bulk materials and uniformly distributed.\n\nQuestion:\nWhat is the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Mg-doped', 'P2-NMM10', 'and', 'Zn-doped', 'P2-NMZ10', 'cathode', 'materials', 'are', 'synthesized', 'by', 'a', 'solid', 'state', 'method,', 'whose', 'P2-type', 'layered', 'structures', 'are', 'confirmed', 'by', 'X-ray', 'diffraction', '(XRD)', '(Fig.', 'S1†', 'and', 'a', 'summary', 'of', 'the', 'crystallographic', 'data', 'is', 'given', 'in', 'Tables', 'S1–S4†).', 'Their', 'compositions', 'are', 'verified', 'by', 'energy', 'dispersive', 'X-ray', 'spectroscopy', '(EDS)', '(Fig.', 'S2†),', 'showing', 'that', 'all', 'the', 'dopants', 'are', 'successfully', 'introduced', 'into', 'the', 'bulk', 'materials', 'and', 'uniformly', 'distributed.', 'Question:', 'What', 'is', 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "What's the cathode?",
-            "truth": [1, 0, 1],
-            "tokens": ["What's", 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nLi and co-authors applied PTCDA-derived polymer P10 as the anode for aqueous K-ion batteries. Saturated solutions of K2SO4 (∼0.69 M) or KNO3 (∼3.75 M) were tested as the electrolytes. The potassium nitrate solution enabled better rate capabilities with P10 as the active material, owing to the higher conductivity. Particularly, ∼90 mA h g−1 was delivered at 5.4 A g−1, which was about 70% of the value achieved at 0.36 A g−1. A full cell with the potassium hexacyanoferrate cathode had an energy density of 24.2 W h kg−1 (per mass of both electrodes), could reach a high power of 2.08 kW kg−1, and retained 74% of the capacity after 300 cycles.\n\nQuestion:\nWhat's the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Li', 'and', 'co-authors', 'applied', 'PTCDA-derived', 'polymer', 'P10', 'as', 'the', 'anode', 'for', 'aqueous', 'K-ion', 'batteries.', 'Saturated', 'solutions', 'of', 'K2SO4', '(∼0.69', 'M)', 'or', 'KNO3', '(∼3.75', 'M)', 'were', 'tested', 'as', 'the', 'electrolytes.', 'The', 'potassium', 'nitrate', 'solution', 'enabled', 'better', 'rate', 'capabilities', 'with', 'P10', 'as', 'the', 'active', 'material,', 'owing', 'to', 'the', 'higher', 'conductivity.', 'Particularly,', '∼90', 'mA', 'h', 'g−1', 'was', 'delivered', 'at', '5.4', 'A', 'g−1,', 'which', 'was', 'about', '70%', 'of', 'the', 'value', 'achieved', 'at', '0.36', 'A', 'g−1.', 'A', 'full', 'cell', 'with', 'the', 'potassium', 'hexacyanoferrate', 'cathode', 'had', 'an', 'energy', 'density', 'of', '24.2', 'W', 'h', 'kg−1', '(per', 'mass', 'of', 'both', 'electrodes),', 'could', 'reach', 'a', 'high', 'power', 'of', '2.08', 'kW', 'kg−1,', 'and', 'retained', '74%', 'of', 'the', 'capacity', 'after', '300', 'cycles.', 'Question:', "What's", 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0],
-        },
-        "validation_0007": {
-            "ori_exp": "What's the anode?",
-            "truth": [1, 0, 1],
-            "tokens": ["What's", 'the', 'anode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nLi and co-authors applied PTCDA-derived polymer P10 as the anode for aqueous K-ion batteries. Saturated solutions of K2SO4 (∼0.69 M) or KNO3 (∼3.75 M) were tested as the electrolytes. The potassium nitrate solution enabled better rate capabilities with P10 as the active material, owing to the higher conductivity. Particularly, ∼90 mA h g−1 was delivered at 5.4 A g−1, which was about 70% of the value achieved at 0.36 A g−1. A full cell with the potassium hexacyanoferrate cathode had an energy density of 24.2 W h kg−1 (per mass of both electrodes), could reach a high power of 2.08 kW kg−1, and retained 74% of the capacity after 300 cycles.\n\nQuestion:\nWhat's the anode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Li', 'and', 'co-authors', 'applied', 'PTCDA-derived', 'polymer', 'P10', 'as', 'the', 'anode', 'for', 'aqueous', 'K-ion', 'batteries.', 'Saturated', 'solutions', 'of', 'K2SO4', '(∼0.69', 'M)', 'or', 'KNO3', '(∼3.75', 'M)', 'were', 'tested', 'as', 'the', 'electrolytes.', 'The', 'potassium', 'nitrate', 'solution', 'enabled', 'better', 'rate', 'capabilities', 'with', 'P10', 'as', 'the', 'active', 'material,', 'owing', 'to', 'the', 'higher', 'conductivity.', 'Particularly,', '∼90', 'mA', 'h', 'g−1', 'was', 'delivered', 'at', '5.4', 'A', 'g−1,', 'which', 'was', 'about', '70%', 'of', 'the', 'value', 'achieved', 'at', '0.36', 'A', 'g−1.', 'A', 'full', 'cell', 'with', 'the', 'potassium', 'hexacyanoferrate', 'cathode', 'had', 'an', 'energy', 'density', 'of', '24.2', 'W', 'h', 'kg−1', '(per', 'mass', 'of', 'both', 'electrodes),', 'could', 'reach', 'a', 'high', 'power', 'of', '2.08', 'kW', 'kg−1,', 'and', 'retained', '74%', 'of', 'the', 'capacity', 'after', '300', 'cycles.', 'Question:', "What's", 'the', 'anode?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0],
-        },
-        "validation_0008": {
-            "ori_exp": "What's the electrolyte?",
-            "truth": [1, 0, 1],
-            "tokens": ["What's", 'the', 'electrolyte?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nLi and co-authors applied PTCDA-derived polymer P10 as the anode for aqueous K-ion batteries. Saturated solutions of K2SO4 (∼0.69 M) or KNO3 (∼3.75 M) were tested as the electrolytes. The potassium nitrate solution enabled better rate capabilities with P10 as the active material, owing to the higher conductivity. Particularly, ∼90 mA h g−1 was delivered at 5.4 A g−1, which was about 70% of the value achieved at 0.36 A g−1. A full cell with the potassium hexacyanoferrate cathode had an energy density of 24.2 W h kg−1 (per mass of both electrodes), could reach a high power of 2.08 kW kg−1, and retained 74% of the capacity after 300 cycles.\n\nQuestion:\nWhat's the electrolyte?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Li', 'and', 'co-authors', 'applied', 'PTCDA-derived', 'polymer', 'P10', 'as', 'the', 'anode', 'for', 'aqueous', 'K-ion', 'batteries.', 'Saturated', 'solutions', 'of', 'K2SO4', '(∼0.69', 'M)', 'or', 'KNO3', '(∼3.75', 'M)', 'were', 'tested', 'as', 'the', 'electrolytes.', 'The', 'potassium', 'nitrate', 'solution', 'enabled', 'better', 'rate', 'capabilities', 'with', 'P10', 'as', 'the', 'active', 'material,', 'owing', 'to', 'the', 'higher', 'conductivity.', 'Particularly,', '∼90', 'mA', 'h', 'g−1', 'was', 'delivered', 'at', '5.4', 'A', 'g−1,', 'which', 'was', 'about', '70%', 'of', 'the', 'value', 'achieved', 'at', '0.36', 'A', 'g−1.', 'A', 'full', 'cell', 'with', 'the', 'potassium', 'hexacyanoferrate', 'cathode', 'had', 'an', 'energy', 'density', 'of', '24.2', 'W', 'h', 'kg−1', '(per', 'mass', 'of', 'both', 'electrodes),', 'could', 'reach', 'a', 'high', 'power', 'of', '2.08', 'kW', 'kg−1,', 'and', 'retained', '74%', 'of', 'the', 'capacity', 'after', '300', 'cycles.', 'Question:', "What's", 'the', 'electrolyte?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "What's the cathode?",
-            "truth": [1, 0, 1],
-            "tokens": ["What's", 'the', 'cathode?'],
-            "category": "battery_qa_target",
-            "full_prompt": "Context:\nElectrolytic water splitting in an electrochemical cell can produce both hydrogen and oxygen through the hydrogen evolution reaction (HER) at the cathode and the oxygen evolution reaction (OER) at the anode, respectively. The electrolysis process can be expressed by eqn (1)–(3).\n\nQuestion:\nWhat's the cathode?\n\nAnswer:",
-            "full_tokens": ['Context:', 'Electrolytic', 'water', 'splitting', 'in', 'an', 'electrochemical', 'cell', 'can', 'produce', 'both', 'hydrogen', 'and', 'oxygen', 'through', 'the', 'hydrogen', 'evolution', 'reaction', '(HER)', 'at', 'the', 'cathode', 'and', 'the', 'oxygen', 'evolution', 'reaction', '(OER)', 'at', 'the', 'anode,', 'respectively.', 'The', 'electrolysis', 'process', 'can', 'be', 'expressed', 'by', 'eqn', '(1)–(3).', 'Question:', "What's", 'the', 'cathode?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0],
-        },
-    },
-    "piqa": {
-        "validation_0000": {
-            "ori_exp": "How do I ready a guinea pig cage for it's new occupants?",
-            "truth": [0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1],
-            "tokens": ['How', 'do', 'I', 'ready', 'a', 'guinea', 'pig', 'cage', 'for', "it's", 'new', 'occupants?'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nHow do I ready a guinea pig cage for it's new occupants?\n\nOption 1:\nProvide the guinea pig with a cage full of a few inches of bedding made of ripped paper strips, you will also need to supply it with a water bottle and a food dish.\n\nOption 2:\nProvide the guinea pig with a cage full of a few inches of bedding made of ripped jeans material, you will also need to supply it with a water bottle and a food dish.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'How', 'do', 'I', 'ready', 'a', 'guinea', 'pig', 'cage', 'for', "it's", 'new', 'occupants?', 'Option', '1:', 'Provide', 'the', 'guinea', 'pig', 'with', 'a', 'cage', 'full', 'of', 'a', 'few', 'inches', 'of', 'bedding', 'made', 'of', 'ripped', 'paper', 'strips,', 'you', 'will', 'also', 'need', 'to', 'supply', 'it', 'with', 'a', 'water', 'bottle', 'and', 'a', 'food', 'dish.', 'Option', '2:', 'Provide', 'the', 'guinea', 'pig', 'with', 'a', 'cage', 'full', 'of', 'a', 'few', 'inches', 'of', 'bedding', 'made', 'of', 'ripped', 'jeans', 'material,', 'you', 'will', 'also', 'need', 'to', 'supply', 'it', 'with', 'a', 'water', 'bottle', 'and', 'a', 'food', 'dish.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 0, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0001": {
-            "ori_exp": "dresser",
-            "truth": [1],
-            "tokens": ['dresser'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\ndresser\n\nOption 1:\nreplace drawer with bobby pin\n\nOption 2:\nfinish, woodgrain with  bobby pin\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'dresser', 'Option', '1:', 'replace', 'drawer', 'with', 'bobby', 'pin', 'Option', '2:', 'finish,', 'woodgrain', 'with', 'bobby', 'pin', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0002": {
-            "ori_exp": "To fight Ivan Drago in Rocky for sega master system.",
-            "truth": [0, 1, 1, 1, 0, 1, 0, 1, 1, 1],
-            "tokens": ['To', 'fight', 'Ivan', 'Drago', 'in', 'Rocky', 'for', 'sega', 'master', 'system.'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nTo fight Ivan Drago in Rocky for sega master system.\n\nOption 1:\nDrago isn't in this game because it was released before Rocky IV.\n\nOption 2:\nYou have to defeat Apollo Creed and Clubber Lang first.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'To', 'fight', 'Ivan', 'Drago', 'in', 'Rocky', 'for', 'sega', 'master', 'system.', 'Option', '1:', 'Drago', "isn't", 'in', 'this', 'game', 'because', 'it', 'was', 'released', 'before', 'Rocky', 'IV.', 'Option', '2:', 'You', 'have', 'to', 'defeat', 'Apollo', 'Creed', 'and', 'Clubber', 'Lang', 'first.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0003": {
-            "ori_exp": "Make outdoor pillow.",
-            "truth": [0, 1, 1],
-            "tokens": ['Make', 'outdoor', 'pillow.'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nMake outdoor pillow.\n\nOption 1:\nBlow into tin can and tie with rubber band.\n\nOption 2:\nBlow into trash bag and tie with rubber band.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'Make', 'outdoor', 'pillow.', 'Option', '1:', 'Blow', 'into', 'tin', 'can', 'and', 'tie', 'with', 'rubber', 'band.', 'Option', '2:', 'Blow', 'into', 'trash', 'bag', 'and', 'tie', 'with', 'rubber', 'band.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0004": {
-            "ori_exp": "ice box",
-            "truth": [0, 1],
-            "tokens": ['ice', 'box'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nice box\n\nOption 1:\nwill turn into a cooler if you add water to it\n\nOption 2:\nwill turn into a cooler if you add soda to it\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'ice', 'box', 'Option', '1:', 'will', 'turn', 'into', 'a', 'cooler', 'if', 'you', 'add', 'water', 'to', 'it', 'Option', '2:', 'will', 'turn', 'into', 'a', 'cooler', 'if', 'you', 'add', 'soda', 'to', 'it', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "Remove soap scum from shower door.",
-            "truth": [1, 1, 1, 0, 1, 1],
-            "tokens": ['Remove', 'soap', 'scum', 'from', 'shower', 'door.'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nRemove soap scum from shower door.\n\nOption 1:\nRub hard with bed sheets, then rinse.\n\nOption 2:\nRub hard with dryer sheets, then rinse.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'Remove', 'soap', 'scum', 'from', 'shower', 'door.', 'Option', '1:', 'Rub', 'hard', 'with', 'bed', 'sheets,', 'then', 'rinse.', 'Option', '2:', 'Rub', 'hard', 'with', 'dryer', 'sheets,', 'then', 'rinse.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "Recycle a spray bottle for a new cleaner.",
-            "truth": [1, 0, 1, 1, 0, 0, 1, 1],
-            "tokens": ['Recycle', 'a', 'spray', 'bottle', 'for', 'a', 'new', 'cleaner.'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nRecycle a spray bottle for a new cleaner.\n\nOption 1:\nOpen the top of the empty spray bottle and check for damage. Rinse the bottle then fill halfway with warm water. Replace the spray nozzle and pump a few times to clear the hose. Empty sparrow bottle and allow to dry before using with a new cleaner.\n\nOption 2:\nOpen the top of the empty spray bottle and check for damage. Rinse the bottle then fill halfway with warm water. Replace the spray nozzle and pump a few times to clear the hose. Empty spray bottle and allow to dry before using with a new cleaner.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'Recycle', 'a', 'spray', 'bottle', 'for', 'a', 'new', 'cleaner.', 'Option', '1:', 'Open', 'the', 'top', 'of', 'the', 'empty', 'spray', 'bottle', 'and', 'check', 'for', 'damage.', 'Rinse', 'the', 'bottle', 'then', 'fill', 'halfway', 'with', 'warm', 'water.', 'Replace', 'the', 'spray', 'nozzle', 'and', 'pump', 'a', 'few', 'times', 'to', 'clear', 'the', 'hose.', 'Empty', 'sparrow', 'bottle', 'and', 'allow', 'to', 'dry', 'before', 'using', 'with', 'a', 'new', 'cleaner.', 'Option', '2:', 'Open', 'the', 'top', 'of', 'the', 'empty', 'spray', 'bottle', 'and', 'check', 'for', 'damage.', 'Rinse', 'the', 'bottle', 'then', 'fill', 'halfway', 'with', 'warm', 'water.', 'Replace', 'the', 'spray', 'nozzle', 'and', 'pump', 'a', 'few', 'times', 'to', 'clear', 'the', 'hose.', 'Empty', 'spray', 'bottle', 'and', 'allow', 'to', 'dry', 'before', 'using', 'with', 'a', 'new', 'cleaner.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0007": {
-            "ori_exp": "How do you attach toilet paper to a glass jar?",
-            "truth": [0, 0, 1, 1, 1, 1, 0, 0, 1, 1],
-            "tokens": ['How', 'do', 'you', 'attach', 'toilet', 'paper', 'to', 'a', 'glass', 'jar?'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nHow do you attach toilet paper to a glass jar?\n\nOption 1:\nPress a piece of double-sided tape to the glass jar and then press the toilet paper onto the tape.\n\nOption 2:\nSpread mayonnaise all over the jar with your palms and then roll the jar in toilet paper.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'How', 'do', 'you', 'attach', 'toilet', 'paper', 'to', 'a', 'glass', 'jar?', 'Option', '1:', 'Press', 'a', 'piece', 'of', 'double-sided', 'tape', 'to', 'the', 'glass', 'jar', 'and', 'then', 'press', 'the', 'toilet', 'paper', 'onto', 'the', 'tape.', 'Option', '2:', 'Spread', 'mayonnaise', 'all', 'over', 'the', 'jar', 'with', 'your', 'palms', 'and', 'then', 'roll', 'the', 'jar', 'in', 'toilet', 'paper.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0008": {
-            "ori_exp": "How to make tissue paper window decorations?",
-            "truth": [0, 0, 1, 1, 1, 1, 1],
-            "tokens": ['How', 'to', 'make', 'tissue', 'paper', 'window', 'decorations?'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nHow to make tissue paper window decorations?\n\nOption 1:\nFind tissue paper and fold it in half. Take scissors and cut out pieces of the paper in the middle. When you are done tape it to your window.\n\nOption 2:\nFind tissue paper and fold it in half. Take scissors and tear out pieces of the paper in the middle. When you are done tape it to your window.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'How', 'to', 'make', 'tissue', 'paper', 'window', 'decorations?', 'Option', '1:', 'Find', 'tissue', 'paper', 'and', 'fold', 'it', 'in', 'half.', 'Take', 'scissors', 'and', 'cut', 'out', 'pieces', 'of', 'the', 'paper', 'in', 'the', 'middle.', 'When', 'you', 'are', 'done', 'tape', 'it', 'to', 'your', 'window.', 'Option', '2:', 'Find', 'tissue', 'paper', 'and', 'fold', 'it', 'in', 'half.', 'Take', 'scissors', 'and', 'tear', 'out', 'pieces', 'of', 'the', 'paper', 'in', 'the', 'middle.', 'When', 'you', 'are', 'done', 'tape', 'it', 'to', 'your', 'window.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "Neatly wrap up an extension cord.",
-            "truth": [1, 1, 0, 0, 1, 1],
-            "tokens": ['Neatly', 'wrap', 'up', 'an', 'extension', 'cord.'],
-            "category": "piqa_target",
-            "full_prompt": "Question:\nNeatly wrap up an extension cord.\n\nOption 1:\nWrap the cord around your hand and elbow.\n\nOption 2:\nWrap the cord around your hand and knee.\n\nWhich option is better?\nAnswer:",
-            "full_tokens": ['Question:', 'Neatly', 'wrap', 'up', 'an', 'extension', 'cord.', 'Option', '1:', 'Wrap', 'the', 'cord', 'around', 'your', 'hand', 'and', 'elbow.', 'Option', '2:', 'Wrap', 'the', 'cord', 'around', 'your', 'hand', 'and', 'knee.', 'Which', 'option', 'is', 'better?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0],
-        },
-    },
-    "trivia_qa_verified": {
-        "validation_0000": {
-            "ori_exp": "Mimi is the heroine of which opera?",
-            "truth": [1, 0, 0, 1, 0, 0, 1],
-            "tokens": ['Mimi', 'is', 'the', 'heroine', 'of', 'which', 'opera?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "Mimi is the heroine of which opera?",
-            "full_tokens": ['Mimi', 'is', 'the', 'heroine', 'of', 'which', 'opera?'],
-            "full_truth": [1, 0, 0, 1, 0, 0, 1],
-        },
-        "validation_0001": {
-            "ori_exp": "How many pints are there in a gallon?",
-            "truth": [0, 1, 1, 0, 1, 0, 0, 1],
-            "tokens": ['How', 'many', 'pints', 'are', 'there', 'in', 'a', 'gallon?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "How many pints are there in a gallon?",
-            "full_tokens": ['How', 'many', 'pints', 'are', 'there', 'in', 'a', 'gallon?'],
-            "full_truth": [0, 1, 1, 0, 1, 0, 0, 1],
-        },
-        "validation_0002": {
-            "ori_exp": "The ports of Astrakhan and Baku are on which body of water?",
-            "truth": [0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1],
-            "tokens": ['The', 'ports', 'of', 'Astrakhan', 'and', 'Baku', 'are', 'on', 'which', 'body', 'of', 'water?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "The ports of Astrakhan and Baku are on which body of water?",
-            "full_tokens": ['The', 'ports', 'of', 'Astrakhan', 'and', 'Baku', 'are', 'on', 'which', 'body', 'of', 'water?'],
-            "full_truth": [0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1],
-        },
-        "validation_0003": {
-            "ori_exp": "What cave, located in Kentucky, has over 400 miles of passages?",
-            "truth": [0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
-            "tokens": ['What', 'cave,', 'located', 'in', 'Kentucky,', 'has', 'over', '400', 'miles', 'of', 'passages?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "What cave, located in Kentucky, has over 400 miles of passages?",
-            "full_tokens": ['What', 'cave,', 'located', 'in', 'Kentucky,', 'has', 'over', '400', 'miles', 'of', 'passages?'],
-            "full_truth": [0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1],
-        },
-        "validation_0004": {
-            "ori_exp": "Which sport, known as jeu de paume in France , is still played at Hampton Court Palace ?",
-            "truth": [0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0],
-            "tokens": ['Which', 'sport,', 'known', 'as', 'jeu', 'de', 'paume', 'in', 'France', ',', 'is', 'still', 'played', 'at', 'Hampton', 'Court', 'Palace', '?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "Which sport, known as jeu de paume in France , is still played at Hampton Court Palace ?",
-            "full_tokens": ['Which', 'sport,', 'known', 'as', 'jeu', 'de', 'paume', 'in', 'France', ',', 'is', 'still', 'played', 'at', 'Hampton', 'Court', 'Palace', '?'],
-            "full_truth": [0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "The piano piece, Fr Elise, well-known to music students, was written by whom?",
-            "truth": [0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0],
-            "tokens": ['The', 'piano', 'piece,', 'Fr', 'Elise,', 'well-known', 'to', 'music', 'students,', 'was', 'written', 'by', 'whom?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "The piano piece, Fr Elise, well-known to music students, was written by whom?",
-            "full_tokens": ['The', 'piano', 'piece,', 'Fr', 'Elise,', 'well-known', 'to', 'music', 'students,', 'was', 'written', 'by', 'whom?'],
-            "full_truth": [0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "What is the city where the White Nile flowing north from Lake Victoria meets the Blue Nile flowing west from Ethiopia?",
-            "truth": [0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1],
-            "tokens": ['What', 'is', 'the', 'city', 'where', 'the', 'White', 'Nile', 'flowing', 'north', 'from', 'Lake', 'Victoria', 'meets', 'the', 'Blue', 'Nile', 'flowing', 'west', 'from', 'Ethiopia?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "What is the city where the White Nile flowing north from Lake Victoria meets the Blue Nile flowing west from Ethiopia?",
-            "full_tokens": ['What', 'is', 'the', 'city', 'where', 'the', 'White', 'Nile', 'flowing', 'north', 'from', 'Lake', 'Victoria', 'meets', 'the', 'Blue', 'Nile', 'flowing', 'west', 'from', 'Ethiopia?'],
-            "full_truth": [0, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1],
-        },
-        "validation_0007": {
-            "ori_exp": "Of which Middle Eastern country is Manama the capital?",
-            "truth": [0, 0, 1, 1, 1, 0, 1, 0, 1],
-            "tokens": ['Of', 'which', 'Middle', 'Eastern', 'country', 'is', 'Manama', 'the', 'capital?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "Of which Middle Eastern country is Manama the capital?",
-            "full_tokens": ['Of', 'which', 'Middle', 'Eastern', 'country', 'is', 'Manama', 'the', 'capital?'],
-            "full_truth": [0, 0, 1, 1, 1, 0, 1, 0, 1],
-        },
-        "validation_0008": {
-            "ori_exp": "From what animal does the delicious meat mutton come from?",
-            "truth": [0, 0, 1, 0, 0, 1, 1, 1, 1, 0],
-            "tokens": ['From', 'what', 'animal', 'does', 'the', 'delicious', 'meat', 'mutton', 'come', 'from?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "From what animal does the delicious meat mutton come from?",
-            "full_tokens": ['From', 'what', 'animal', 'does', 'the', 'delicious', 'meat', 'mutton', 'come', 'from?'],
-            "full_truth": [0, 0, 1, 0, 0, 1, 1, 1, 1, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "What is the square root of 225?",
-            "truth": [0, 0, 0, 1, 1, 0, 1],
-            "tokens": ['What', 'is', 'the', 'square', 'root', 'of', '225?'],
-            "category": "trivia_qa_verified_target",
-            "full_prompt": "What is the square root of 225?",
-            "full_tokens": ['What', 'is', 'the', 'square', 'root', 'of', '225?'],
-            "full_truth": [0, 0, 0, 1, 1, 0, 1],
-        },
-    },
-    "mmlu": {
-        "validation_0000": {
-            "ori_exp": "The cyclic subgroup of Z_24 generated by 18 has order",
-            "truth": [0, 1, 1, 0, 1, 1, 0, 0, 0, 1],
-            "tokens": ['The', 'cyclic', 'subgroup', 'of', 'Z_24', 'generated', 'by', '18', 'has', 'order'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nThe cyclic subgroup of Z_24 generated by 18 has order\n\nOption A:\n4\n\nOption B:\n8\n\nOption C:\n12\n\nOption D:\n6\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'The', 'cyclic', 'subgroup', 'of', 'Z_24', 'generated', 'by', '18', 'has', 'order', 'Option', 'A:', '4', 'Option', 'B:', '8', 'Option', 'C:', '12', 'Option', 'D:', '6', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0001": {
-            "ori_exp": "Find the order of the factor group Z_6/<3>.",
-            "truth": [1, 0, 1, 0, 0, 1, 1, 1],
-            "tokens": ['Find', 'the', 'order', 'of', 'the', 'factor', 'group', 'Z_6/<3>.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nFind the order of the factor group Z_6/<3>.\n\nOption A:\n2\n\nOption B:\n3\n\nOption C:\n6\n\nOption D:\n12\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Find', 'the', 'order', 'of', 'the', 'factor', 'group', 'Z_6/<3>.', 'Option', 'A:', '2', 'Option', 'B:', '3', 'Option', 'C:', '6', 'Option', 'D:', '12', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0002": {
-            "ori_exp": "Statement 1 | A permutation that is a product of m even permutations and n odd permutations is an even permutation if and only if n is even. Statement 2 | Every group is isomorphic to a group of permutations.",
-            "truth": [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1],
-            "tokens": ['Statement', '1', '|', 'A', 'permutation', 'that', 'is', 'a', 'product', 'of', 'm', 'even', 'permutations', 'and', 'n', 'odd', 'permutations', 'is', 'an', 'even', 'permutation', 'if', 'and', 'only', 'if', 'n', 'is', 'even.', 'Statement', '2', '|', 'Every', 'group', 'is', 'isomorphic', 'to', 'a', 'group', 'of', 'permutations.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nStatement 1 | A permutation that is a product of m even permutations and n odd permutations is an even permutation if and only if n is even. Statement 2 | Every group is isomorphic to a group of permutations.\n\nOption A:\nTrue, True\n\nOption B:\nFalse, False\n\nOption C:\nTrue, False\n\nOption D:\nFalse, True\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Statement', '1', '|', 'A', 'permutation', 'that', 'is', 'a', 'product', 'of', 'm', 'even', 'permutations', 'and', 'n', 'odd', 'permutations', 'is', 'an', 'even', 'permutation', 'if', 'and', 'only', 'if', 'n', 'is', 'even.', 'Statement', '2', '|', 'Every', 'group', 'is', 'isomorphic', 'to', 'a', 'group', 'of', 'permutations.', 'Option', 'A:', 'True,', 'True', 'Option', 'B:', 'False,', 'False', 'Option', 'C:', 'True,', 'False', 'Option', 'D:', 'False,', 'True', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0003": {
-            "ori_exp": "Find the order of the factor group (Z_4 x Z_12)/(<2> x <2>)",
-            "truth": [1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0],
-            "tokens": ['Find', 'the', 'order', 'of', 'the', 'factor', 'group', '(Z_4', 'x', 'Z_12)/(<2>', 'x', '<2>)'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nFind the order of the factor group (Z_4 x Z_12)/(<2> x <2>)\n\nOption A:\n2\n\nOption B:\n3\n\nOption C:\n4\n\nOption D:\n12\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Find', 'the', 'order', 'of', 'the', 'factor', 'group', '(Z_4', 'x', 'Z_12)/(<2>', 'x', '<2>)', 'Option', 'A:', '2', 'Option', 'B:', '3', 'Option', 'C:', '4', 'Option', 'D:', '12', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0004": {
-            "ori_exp": "Find the maximum possible order for some element of Z_4 x Z_6.",
-            "truth": [1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1],
-            "tokens": ['Find', 'the', 'maximum', 'possible', 'order', 'for', 'some', 'element', 'of', 'Z_4', 'x', 'Z_6.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nFind the maximum possible order for some element of Z_4 x Z_6.\n\nOption A:\n4\n\nOption B:\n6\n\nOption C:\n12\n\nOption D:\n24\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Find', 'the', 'maximum', 'possible', 'order', 'for', 'some', 'element', 'of', 'Z_4', 'x', 'Z_6.', 'Option', 'A:', '4', 'Option', 'B:', '6', 'Option', 'C:', '12', 'Option', 'D:', '24', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "Statement 1 | The symmetric group S_3 is cyclic. Statement 2 | Every group is isomorphic to some group of permutations.",
-            "truth": [1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1],
-            "tokens": ['Statement', '1', '|', 'The', 'symmetric', 'group', 'S_3', 'is', 'cyclic.', 'Statement', '2', '|', 'Every', 'group', 'is', 'isomorphic', 'to', 'some', 'group', 'of', 'permutations.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nStatement 1 | The symmetric group S_3 is cyclic. Statement 2 | Every group is isomorphic to some group of permutations.\n\nOption A:\nTrue, True\n\nOption B:\nFalse, False\n\nOption C:\nTrue, False\n\nOption D:\nFalse, True\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Statement', '1', '|', 'The', 'symmetric', 'group', 'S_3', 'is', 'cyclic.', 'Statement', '2', '|', 'Every', 'group', 'is', 'isomorphic', 'to', 'some', 'group', 'of', 'permutations.', 'Option', 'A:', 'True,', 'True', 'Option', 'B:', 'False,', 'False', 'Option', 'C:', 'True,', 'False', 'Option', 'D:', 'False,', 'True', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "Statement 1 | If a and b are elements of finite order in an Abelian group, then |ab| is the lcm (|a|,|b|). Statement 2 | If g is a group element and g^n = e, then |g| = n.",
-            "truth": [1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0],
-            "tokens": ['Statement', '1', '|', 'If', 'a', 'and', 'b', 'are', 'elements', 'of', 'finite', 'order', 'in', 'an', 'Abelian', 'group,', 'then', '|ab|', 'is', 'the', 'lcm', '(|a|,|b|).', 'Statement', '2', '|', 'If', 'g', 'is', 'a', 'group', 'element', 'and', 'g^n', '=', 'e,', 'then', '|g|', '=', 'n.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nStatement 1 | If a and b are elements of finite order in an Abelian group, then |ab| is the lcm (|a|,|b|). Statement 2 | If g is a group element and g^n = e, then |g| = n.\n\nOption A:\nTrue, True\n\nOption B:\nFalse, False\n\nOption C:\nTrue, False\n\nOption D:\nFalse, True\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Statement', '1', '|', 'If', 'a', 'and', 'b', 'are', 'elements', 'of', 'finite', 'order', 'in', 'an', 'Abelian', 'group,', 'then', '|ab|', 'is', 'the', 'lcm', '(|a|,|b|).', 'Statement', '2', '|', 'If', 'g', 'is', 'a', 'group', 'element', 'and', 'g^n', '=', 'e,', 'then', '|g|', '=', 'n.', 'Option', 'A:', 'True,', 'True', 'Option', 'B:', 'False,', 'False', 'Option', 'C:', 'True,', 'False', 'Option', 'D:', 'False,', 'True', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0007": {
-            "ori_exp": "Statement 1 | If f is a homomorphism from G to K and H is normal in G then f(H) is normal in K. Statement 2 | If f is a homomorphism from G to a group and H is finite subgroup of G, then |f(H)| divides |H|.",
-            "truth": [1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0],
-            "tokens": ['Statement', '1', '|', 'If', 'f', 'is', 'a', 'homomorphism', 'from', 'G', 'to', 'K', 'and', 'H', 'is', 'normal', 'in', 'G', 'then', 'f(H)', 'is', 'normal', 'in', 'K.', 'Statement', '2', '|', 'If', 'f', 'is', 'a', 'homomorphism', 'from', 'G', 'to', 'a', 'group', 'and', 'H', 'is', 'finite', 'subgroup', 'of', 'G,', 'then', '|f(H)|', 'divides', '|H|.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nStatement 1 | If f is a homomorphism from G to K and H is normal in G then f(H) is normal in K. Statement 2 | If f is a homomorphism from G to a group and H is finite subgroup of G, then |f(H)| divides |H|.\n\nOption A:\nTrue, True\n\nOption B:\nFalse, False\n\nOption C:\nTrue, False\n\nOption D:\nFalse, True\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Statement', '1', '|', 'If', 'f', 'is', 'a', 'homomorphism', 'from', 'G', 'to', 'K', 'and', 'H', 'is', 'normal', 'in', 'G', 'then', 'f(H)', 'is', 'normal', 'in', 'K.', 'Statement', '2', '|', 'If', 'f', 'is', 'a', 'homomorphism', 'from', 'G', 'to', 'a', 'group', 'and', 'H', 'is', 'finite', 'subgroup', 'of', 'G,', 'then', '|f(H)|', 'divides', '|H|.', 'Option', 'A:', 'True,', 'True', 'Option', 'B:', 'False,', 'False', 'Option', 'C:', 'True,', 'False', 'Option', 'D:', 'False,', 'True', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0008": {
-            "ori_exp": "Find the maximum possible order for an element of S_n for n = 7.",
-            "truth": [1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0],
-            "tokens": ['Find', 'the', 'maximum', 'possible', 'order', 'for', 'an', 'element', 'of', 'S_n', 'for', 'n', '=', '7.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nFind the maximum possible order for an element of S_n for n = 7.\n\nOption A:\n6\n\nOption B:\n12\n\nOption C:\n30\n\nOption D:\n105\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Find', 'the', 'maximum', 'possible', 'order', 'for', 'an', 'element', 'of', 'S_n', 'for', 'n', '=', '7.', 'Option', 'A:', '6', 'Option', 'B:', '12', 'Option', 'C:', '30', 'Option', 'D:', '105', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "Statement 1 | Every integral domain has a field of quotients. Statement 2 | A polynomial of degree n over a ring can have at most n zeros counting multiplicity.",
-            "truth": [1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1],
-            "tokens": ['Statement', '1', '|', 'Every', 'integral', 'domain', 'has', 'a', 'field', 'of', 'quotients.', 'Statement', '2', '|', 'A', 'polynomial', 'of', 'degree', 'n', 'over', 'a', 'ring', 'can', 'have', 'at', 'most', 'n', 'zeros', 'counting', 'multiplicity.'],
-            "category": "mmlu_target",
-            "full_prompt": "Question:\nStatement 1 | Every integral domain has a field of quotients. Statement 2 | A polynomial of degree n over a ring can have at most n zeros counting multiplicity.\n\nOption A:\nTrue, True\n\nOption B:\nFalse, False\n\nOption C:\nTrue, False\n\nOption D:\nFalse, True\n\nWhich option is correct?\nAnswer:",
-            "full_tokens": ['Question:', 'Statement', '1', '|', 'Every', 'integral', 'domain', 'has', 'a', 'field', 'of', 'quotients.', 'Statement', '2', '|', 'A', 'polynomial', 'of', 'degree', 'n', 'over', 'a', 'ring', 'can', 'have', 'at', 'most', 'n', 'zeros', 'counting', 'multiplicity.', 'Option', 'A:', 'True,', 'True', 'Option', 'B:', 'False,', 'False', 'Option', 'C:', 'True,', 'False', 'Option', 'D:', 'False,', 'True', 'Which', 'option', 'is', 'correct?', 'Answer:'],
-            "full_truth": [0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0],
-        },
-    },
-    "hellaswag": {
-        "validation_0000": {
-            "ori_exp": "A man is sitting on a roof. he",
-            "truth": [0, 1, 0, 1, 0, 0, 1, 0],
-            "tokens": ['A', 'man', 'is', 'sitting', 'on', 'a', 'roof.', 'he'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA man is sitting on a roof. he\n\nOption 1:\nis using wrap to wrap a pair of skis.\n\nOption 2:\nis ripping level tiles off.\n\nOption 3:\nis holding a rubik's cube.\n\nOption 4:\nstarts pulling up roofing on a roof.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'man', 'is', 'sitting', 'on', 'a', 'roof.', 'he', 'Option', '1:', 'is', 'using', 'wrap', 'to', 'wrap', 'a', 'pair', 'of', 'skis.', 'Option', '2:', 'is', 'ripping', 'level', 'tiles', 'off.', 'Option', '3:', 'is', 'holding', 'a', "rubik's", 'cube.', 'Option', '4:', 'starts', 'pulling', 'up', 'roofing', 'on', 'a', 'roof.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0001": {
-            "ori_exp": "A lady walks to a barbell. She bends down and grabs the pole. the lady",
-            "truth": [0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1],
-            "tokens": ['A', 'lady', 'walks', 'to', 'a', 'barbell.', 'She', 'bends', 'down', 'and', 'grabs', 'the', 'pole.', 'the', 'lady'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA lady walks to a barbell. She bends down and grabs the pole. the lady\n\nOption 1:\nswings and lands in her arms.\n\nOption 2:\npulls the barbell forward.\n\nOption 3:\npulls a rope attached to the barbell.\n\nOption 4:\nstands and lifts the weight over her head.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'lady', 'walks', 'to', 'a', 'barbell.', 'She', 'bends', 'down', 'and', 'grabs', 'the', 'pole.', 'the', 'lady', 'Option', '1:', 'swings', 'and', 'lands', 'in', 'her', 'arms.', 'Option', '2:', 'pulls', 'the', 'barbell', 'forward.', 'Option', '3:', 'pulls', 'a', 'rope', 'attached', 'to', 'the', 'barbell.', 'Option', '4:', 'stands', 'and', 'lifts', 'the', 'weight', 'over', 'her', 'head.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0002": {
-            "ori_exp": "Two women in a child are shown in a canoe while a man pulls the canoe while standing in the water, with other individuals visible in the background. the child and a different man",
-            "truth": [1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1],
-            "tokens": ['Two', 'women', 'in', 'a', 'child', 'are', 'shown', 'in', 'a', 'canoe', 'while', 'a', 'man', 'pulls', 'the', 'canoe', 'while', 'standing', 'in', 'the', 'water,', 'with', 'other', 'individuals', 'visible', 'in', 'the', 'background.', 'the', 'child', 'and', 'a', 'different', 'man'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nTwo women in a child are shown in a canoe while a man pulls the canoe while standing in the water, with other individuals visible in the background. the child and a different man\n\nOption 1:\nare then shown paddling down a river in a boat while a woman talks.\n\nOption 2:\nare driving the canoe, they go down the river flowing side to side.\n\nOption 3:\nsit in a canoe while the man paddles.\n\nOption 4:\nwalking go down the rapids, while the man in his helicopter almost falls and goes out of canoehood.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'Two', 'women', 'in', 'a', 'child', 'are', 'shown', 'in', 'a', 'canoe', 'while', 'a', 'man', 'pulls', 'the', 'canoe', 'while', 'standing', 'in', 'the', 'water,', 'with', 'other', 'individuals', 'visible', 'in', 'the', 'background.', 'the', 'child', 'and', 'a', 'different', 'man', 'Option', '1:', 'are', 'then', 'shown', 'paddling', 'down', 'a', 'river', 'in', 'a', 'boat', 'while', 'a', 'woman', 'talks.', 'Option', '2:', 'are', 'driving', 'the', 'canoe,', 'they', 'go', 'down', 'the', 'river', 'flowing', 'side', 'to', 'side.', 'Option', '3:', 'sit', 'in', 'a', 'canoe', 'while', 'the', 'man', 'paddles.', 'Option', '4:', 'walking', 'go', 'down', 'the', 'rapids,', 'while', 'the', 'man', 'in', 'his', 'helicopter', 'almost', 'falls', 'and', 'goes', 'out', 'of', 'canoehood.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0003": {
-            "ori_exp": "A boy is running down a track. the boy",
-            "truth": [0, 1, 0, 1, 1, 0, 1, 0, 1],
-            "tokens": ['A', 'boy', 'is', 'running', 'down', 'a', 'track.', 'the', 'boy'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA boy is running down a track. the boy\n\nOption 1:\nruns into a car.\n\nOption 2:\ngets in a mat.\n\nOption 3:\nlifts his body above the height of a pole.\n\nOption 4:\nstands on his hands and springs.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'boy', 'is', 'running', 'down', 'a', 'track.', 'the', 'boy', 'Option', '1:', 'runs', 'into', 'a', 'car.', 'Option', '2:', 'gets', 'in', 'a', 'mat.', 'Option', '3:', 'lifts', 'his', 'body', 'above', 'the', 'height', 'of', 'a', 'pole.', 'Option', '4:', 'stands', 'on', 'his', 'hands', 'and', 'springs.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0004": {
-            "ori_exp": "The boy lifts his body above the height of a pole. The boy lands on his back on to a red mat. the boy",
-            "truth": [0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1],
-            "tokens": ['The', 'boy', 'lifts', 'his', 'body', 'above', 'the', 'height', 'of', 'a', 'pole.', 'The', 'boy', 'lands', 'on', 'his', 'back', 'on', 'to', 'a', 'red', 'mat.', 'the', 'boy'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nThe boy lifts his body above the height of a pole. The boy lands on his back on to a red mat. the boy\n\nOption 1:\nturns his body around on the mat.\n\nOption 2:\ngets up from the mat.\n\nOption 3:\ncontinues to lift his body over the pole.\n\nOption 4:\nwiggles out of the mat.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'The', 'boy', 'lifts', 'his', 'body', 'above', 'the', 'height', 'of', 'a', 'pole.', 'The', 'boy', 'lands', 'on', 'his', 'back', 'on', 'to', 'a', 'red', 'mat.', 'the', 'boy', 'Option', '1:', 'turns', 'his', 'body', 'around', 'on', 'the', 'mat.', 'Option', '2:', 'gets', 'up', 'from', 'the', 'mat.', 'Option', '3:', 'continues', 'to', 'lift', 'his', 'body', 'over', 'the', 'pole.', 'Option', '4:', 'wiggles', 'out', 'of', 'the', 'mat.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "The boy lands on his back on to a red mat. The boy gets up from the mat. the boy",
-            "truth": [0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1],
-            "tokens": ['The', 'boy', 'lands', 'on', 'his', 'back', 'on', 'to', 'a', 'red', 'mat.', 'The', 'boy', 'gets', 'up', 'from', 'the', 'mat.', 'the', 'boy'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nThe boy lands on his back on to a red mat. The boy gets up from the mat. the boy\n\nOption 1:\nstarts doing spins.\n\nOption 2:\ncelebrates by clapping and flexing both arms.\n\nOption 3:\nis dancing on the mat.\n\nOption 4:\ndoes jump jacks on his stick.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'The', 'boy', 'lands', 'on', 'his', 'back', 'on', 'to', 'a', 'red', 'mat.', 'The', 'boy', 'gets', 'up', 'from', 'the', 'mat.', 'the', 'boy', 'Option', '1:', 'starts', 'doing', 'spins.', 'Option', '2:', 'celebrates', 'by', 'clapping', 'and', 'flexing', 'both', 'arms.', 'Option', '3:', 'is', 'dancing', 'on', 'the', 'mat.', 'Option', '4:', 'does', 'jump', 'jacks', 'on', 'his', 'stick.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "A man is standing in front of a camera. He starts playing a harmonica for the camera. he",
-            "truth": [0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0],
-            "tokens": ['A', 'man', 'is', 'standing', 'in', 'front', 'of', 'a', 'camera.', 'He', 'starts', 'playing', 'a', 'harmonica', 'for', 'the', 'camera.', 'he'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA man is standing in front of a camera. He starts playing a harmonica for the camera. he\n\nOption 1:\nbegins to play the harmonica with his body while looking at the camera.\n\nOption 2:\nseems to be singing while playing the harmonica.\n\nOption 3:\nrocks back and forth to the music as he goes.\n\nOption 4:\npainted a fence in front of the camera.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'man', 'is', 'standing', 'in', 'front', 'of', 'a', 'camera.', 'He', 'starts', 'playing', 'a', 'harmonica', 'for', 'the', 'camera.', 'he', 'Option', '1:', 'begins', 'to', 'play', 'the', 'harmonica', 'with', 'his', 'body', 'while', 'looking', 'at', 'the', 'camera.', 'Option', '2:', 'seems', 'to', 'be', 'singing', 'while', 'playing', 'the', 'harmonica.', 'Option', '3:', 'rocks', 'back', 'and', 'forth', 'to', 'the', 'music', 'as', 'he', 'goes.', 'Option', '4:', 'painted', 'a', 'fence', 'in', 'front', 'of', 'the', 'camera.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0007": {
-            "ori_exp": "A cartoon animation video is shown with people wandering around and rockets being shot. two men",
-            "truth": [0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1],
-            "tokens": ['A', 'cartoon', 'animation', 'video', 'is', 'shown', 'with', 'people', 'wandering', 'around', 'and', 'rockets', 'being', 'shot.', 'two', 'men'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA cartoon animation video is shown with people wandering around and rockets being shot. two men\n\nOption 1:\nfight robots of evil and ends with a to be continued.\n\nOption 2:\nare then shown in closeups shooting a shot put.\n\nOption 3:\npush a child in a speedboat in the water.\n\nOption 4:\nlook in the cameraman's eye and smile.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'cartoon', 'animation', 'video', 'is', 'shown', 'with', 'people', 'wandering', 'around', 'and', 'rockets', 'being', 'shot.', 'two', 'men', 'Option', '1:', 'fight', 'robots', 'of', 'evil', 'and', 'ends', 'with', 'a', 'to', 'be', 'continued.', 'Option', '2:', 'are', 'then', 'shown', 'in', 'closeups', 'shooting', 'a', 'shot', 'put.', 'Option', '3:', 'push', 'a', 'child', 'in', 'a', 'speedboat', 'in', 'the', 'water.', 'Option', '4:', 'look', 'in', 'the', "cameraman's", 'eye', 'and', 'smile.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0008": {
-            "ori_exp": "A man is holding a pocket knife while sitting on some rocks in the wilderness. then he",
-            "truth": [0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0],
-            "tokens": ['A', 'man', 'is', 'holding', 'a', 'pocket', 'knife', 'while', 'sitting', 'on', 'some', 'rocks', 'in', 'the', 'wilderness.', 'then', 'he'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nA man is holding a pocket knife while sitting on some rocks in the wilderness. then he\n\nOption 1:\nopens a can of oil put oil on the knife, and puts oil on a knife and press it through a can filled with oil then cuts several pieces from the sandwiches.\n\nOption 2:\ntakes a small stone from the flowing river and smashes it on another stone.\n\nOption 3:\nuses the knife to shave his leg.\n\nOption 4:\nsand the rocks and tops them by using strong pressure.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'A', 'man', 'is', 'holding', 'a', 'pocket', 'knife', 'while', 'sitting', 'on', 'some', 'rocks', 'in', 'the', 'wilderness.', 'then', 'he', 'Option', '1:', 'opens', 'a', 'can', 'of', 'oil', 'put', 'oil', 'on', 'the', 'knife,', 'and', 'puts', 'oil', 'on', 'a', 'knife', 'and', 'press', 'it', 'through', 'a', 'can', 'filled', 'with', 'oil', 'then', 'cuts', 'several', 'pieces', 'from', 'the', 'sandwiches.', 'Option', '2:', 'takes', 'a', 'small', 'stone', 'from', 'the', 'flowing', 'river', 'and', 'smashes', 'it', 'on', 'another', 'stone.', 'Option', '3:', 'uses', 'the', 'knife', 'to', 'shave', 'his', 'leg.', 'Option', '4:', 'sand', 'the', 'rocks', 'and', 'tops', 'them', 'by', 'using', 'strong', 'pressure.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "Then he takes a small stone from the flowing river and smashes it on another stone. He starts to crush the small stone to smaller pieces. he",
-            "truth": [0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0],
-            "tokens": ['Then', 'he', 'takes', 'a', 'small', 'stone', 'from', 'the', 'flowing', 'river', 'and', 'smashes', 'it', 'on', 'another', 'stone.', 'He', 'starts', 'to', 'crush', 'the', 'small', 'stone', 'to', 'smaller', 'pieces.', 'he'],
-            "category": "hellaswag_target",
-            "full_prompt": "Context:\nThen he takes a small stone from the flowing river and smashes it on another stone. He starts to crush the small stone to smaller pieces. he\n\nOption 1:\ncuts the center stone in half and blow it on to make it bigger.\n\nOption 2:\ngrind it hard to make the pieces smaller.\n\nOption 3:\neventually brings it back into view and adds it to the smaller ones to make a small triangular shaped piece.\n\nOption 4:\nstarts to party with them and throw the pieces by hand while they celebrate.\n\nWhich option is the most plausible continuation?\nAnswer:",
-            "full_tokens": ['Context:', 'Then', 'he', 'takes', 'a', 'small', 'stone', 'from', 'the', 'flowing', 'river', 'and', 'smashes', 'it', 'on', 'another', 'stone.', 'He', 'starts', 'to', 'crush', 'the', 'small', 'stone', 'to', 'smaller', 'pieces.', 'he', 'Option', '1:', 'cuts', 'the', 'center', 'stone', 'in', 'half', 'and', 'blow', 'it', 'on', 'to', 'make', 'it', 'bigger.', 'Option', '2:', 'grind', 'it', 'hard', 'to', 'make', 'the', 'pieces', 'smaller.', 'Option', '3:', 'eventually', 'brings', 'it', 'back', 'into', 'view', 'and', 'adds', 'it', 'to', 'the', 'smaller', 'ones', 'to', 'make', 'a', 'small', 'triangular', 'shaped', 'piece.', 'Option', '4:', 'starts', 'to', 'party', 'with', 'them', 'and', 'throw', 'the', 'pieces', 'by', 'hand', 'while', 'they', 'celebrate.', 'Which', 'option', 'is', 'the', 'most', 'plausible', 'continuation?', 'Answer:'],
-            "full_truth": [0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-    },
-    "boolq": {
-        "validation_0000": {
-            "ori_exp": "does ethanol take more energy make that produces",
-            "truth": [0, 1, 1, 1, 1, 1, 0, 1],
-            "tokens": ['does', 'ethanol', 'take', 'more', 'energy', 'make', 'that', 'produces'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nAll biomass goes through at least some of these steps: it needs to be grown, collected, dried, fermented, distilled, and burned. All of these steps require resources and an infrastructure. The total amount of energy input into the process compared to the energy released by burning the resulting ethanol fuel is known as the energy balance (or ``energy returned on energy invested''). Figures compiled in a 2007 report by National Geographic Magazine point to modest results for corn ethanol produced in the US: one unit of fossil-fuel energy is required to create 1.3 energy units from the resulting ethanol. The energy balance for sugarcane ethanol produced in Brazil is more favorable, with one unit of fossil-fuel energy required to create 8 from the ethanol. Energy balance estimates are not easily produced, thus numerous such reports have been generated that are contradictory. For instance, a separate survey reports that production of ethanol from sugarcane, which requires a tropical climate to grow productively, returns from 8 to 9 units of energy for each unit expended, as compared to corn, which only returns about 1.34 units of fuel energy for each unit of energy expended. A 2006 University of California Berkeley study, after analyzing six separate studies, concluded that producing ethanol from corn uses much less petroleum than producing gasoline.\n\nQuestion:\ndoes ethanol take more energy make that produces\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'All', 'biomass', 'goes', 'through', 'at', 'least', 'some', 'of', 'these', 'steps:', 'it', 'needs', 'to', 'be', 'grown,', 'collected,', 'dried,', 'fermented,', 'distilled,', 'and', 'burned.', 'All', 'of', 'these', 'steps', 'require', 'resources', 'and', 'an', 'infrastructure.', 'The', 'total', 'amount', 'of', 'energy', 'input', 'into', 'the', 'process', 'compared', 'to', 'the', 'energy', 'released', 'by', 'burning', 'the', 'resulting', 'ethanol', 'fuel', 'is', 'known', 'as', 'the', 'energy', 'balance', '(or', '``energy', 'returned', 'on', 'energy', "invested'').", 'Figures', 'compiled', 'in', 'a', '2007', 'report', 'by', 'National', 'Geographic', 'Magazine', 'point', 'to', 'modest', 'results', 'for', 'corn', 'ethanol', 'produced', 'in', 'the', 'US:', 'one', 'unit', 'of', 'fossil-fuel', 'energy', 'is', 'required', 'to', 'create', '1.3', 'energy', 'units', 'from', 'the', 'resulting', 'ethanol.', 'The', 'energy', 'balance', 'for', 'sugarcane', 'ethanol', 'produced', 'in', 'Brazil', 'is', 'more', 'favorable,', 'with', 'one', 'unit', 'of', 'fossil-fuel', 'energy', 'required', 'to', 'create', '8', 'from', 'the', 'ethanol.', 'Energy', 'balance', 'estimates', 'are', 'not', 'easily', 'produced,', 'thus', 'numerous', 'such', 'reports', 'have', 'been', 'generated', 'that', 'are', 'contradictory.', 'For', 'instance,', 'a', 'separate', 'survey', 'reports', 'that', 'production', 'of', 'ethanol', 'from', 'sugarcane,', 'which', 'requires', 'a', 'tropical', 'climate', 'to', 'grow', 'productively,', 'returns', 'from', '8', 'to', '9', 'units', 'of', 'energy', 'for', 'each', 'unit', 'expended,', 'as', 'compared', 'to', 'corn,', 'which', 'only', 'returns', 'about', '1.34', 'units', 'of', 'fuel', 'energy', 'for', 'each', 'unit', 'of', 'energy', 'expended.', 'A', '2006', 'University', 'of', 'California', 'Berkeley', 'study,', 'after', 'analyzing', 'six', 'separate', 'studies,', 'concluded', 'that', 'producing', 'ethanol', 'from', 'corn', 'uses', 'much', 'less', 'petroleum', 'than', 'producing', 'gasoline.', 'Question:', 'does', 'ethanol', 'take', 'more', 'energy', 'make', 'that', 'produces', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0001": {
-            "ori_exp": "is house tax and property tax are same",
-            "truth": [0, 1, 1, 0, 1, 1, 0, 1],
-            "tokens": ['is', 'house', 'tax', 'and', 'property', 'tax', 'are', 'same'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nProperty tax or 'house tax' is a local tax on buildings, along with appurtenant land. It is and imposed on the Possessor (not the custodian of property as per 1978, 44th amendment of constitution). It resembles the US-type wealth tax and differs from the excise-type UK rate. The tax power is vested in the states and is delegated to local bodies, specifying the valuation method, rate band, and collection procedures. The tax base is the annual rental value (ARV) or area-based rating. Owner-occupied and other properties not producing rent are assessed on cost and then converted into ARV by applying a percentage of cost, usually four percent. Vacant land is generally exempt. Central government properties are exempt. Instead a 'service charge' is permissible under executive order. Properties of foreign missions also enjoy tax exemption without requiring reciprocity. The tax is usually accompanied by service taxes, e.g., water tax, drainage tax, conservancy (sanitation) tax, lighting tax, all using the same tax base. The rate structure is flat on rural (panchayat) properties, but in the urban (municipal) areas it is mildly progressive with about 80% of assessments falling in the first two brackets.\n\nQuestion:\nis house tax and property tax are same\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Property', 'tax', 'or', "'house", "tax'", 'is', 'a', 'local', 'tax', 'on', 'buildings,', 'along', 'with', 'appurtenant', 'land.', 'It', 'is', 'and', 'imposed', 'on', 'the', 'Possessor', '(not', 'the', 'custodian', 'of', 'property', 'as', 'per', '1978,', '44th', 'amendment', 'of', 'constitution).', 'It', 'resembles', 'the', 'US-type', 'wealth', 'tax', 'and', 'differs', 'from', 'the', 'excise-type', 'UK', 'rate.', 'The', 'tax', 'power', 'is', 'vested', 'in', 'the', 'states', 'and', 'is', 'delegated', 'to', 'local', 'bodies,', 'specifying', 'the', 'valuation', 'method,', 'rate', 'band,', 'and', 'collection', 'procedures.', 'The', 'tax', 'base', 'is', 'the', 'annual', 'rental', 'value', '(ARV)', 'or', 'area-based', 'rating.', 'Owner-occupied', 'and', 'other', 'properties', 'not', 'producing', 'rent', 'are', 'assessed', 'on', 'cost', 'and', 'then', 'converted', 'into', 'ARV', 'by', 'applying', 'a', 'percentage', 'of', 'cost,', 'usually', 'four', 'percent.', 'Vacant', 'land', 'is', 'generally', 'exempt.', 'Central', 'government', 'properties', 'are', 'exempt.', 'Instead', 'a', "'service", "charge'", 'is', 'permissible', 'under', 'executive', 'order.', 'Properties', 'of', 'foreign', 'missions', 'also', 'enjoy', 'tax', 'exemption', 'without', 'requiring', 'reciprocity.', 'The', 'tax', 'is', 'usually', 'accompanied', 'by', 'service', 'taxes,', 'e.g.,', 'water', 'tax,', 'drainage', 'tax,', 'conservancy', '(sanitation)', 'tax,', 'lighting', 'tax,', 'all', 'using', 'the', 'same', 'tax', 'base.', 'The', 'rate', 'structure', 'is', 'flat', 'on', 'rural', '(panchayat)', 'properties,', 'but', 'in', 'the', 'urban', '(municipal)', 'areas', 'it', 'is', 'mildly', 'progressive', 'with', 'about', '80%', 'of', 'assessments', 'falling', 'in', 'the', 'first', 'two', 'brackets.', 'Question:', 'is', 'house', 'tax', 'and', 'property', 'tax', 'are', 'same', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0002": {
-            "ori_exp": "is pain experienced in a missing body part or paralyzed area",
-            "truth": [0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1],
-            "tokens": ['is', 'pain', 'experienced', 'in', 'a', 'missing', 'body', 'part', 'or', 'paralyzed', 'area'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nPhantom pain sensations are described as perceptions that an individual experiences relating to a limb or an organ that is not physically part of the body. Limb loss is a result of either removal by amputation or congenital limb deficiency. However, phantom limb sensations can also occur following nerve avulsion or spinal cord injury.\n\nQuestion:\nis pain experienced in a missing body part or paralyzed area\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Phantom', 'pain', 'sensations', 'are', 'described', 'as', 'perceptions', 'that', 'an', 'individual', 'experiences', 'relating', 'to', 'a', 'limb', 'or', 'an', 'organ', 'that', 'is', 'not', 'physically', 'part', 'of', 'the', 'body.', 'Limb', 'loss', 'is', 'a', 'result', 'of', 'either', 'removal', 'by', 'amputation', 'or', 'congenital', 'limb', 'deficiency.', 'However,', 'phantom', 'limb', 'sensations', 'can', 'also', 'occur', 'following', 'nerve', 'avulsion', 'or', 'spinal', 'cord', 'injury.', 'Question:', 'is', 'pain', 'experienced', 'in', 'a', 'missing', 'body', 'part', 'or', 'paralyzed', 'area', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0003": {
-            "ori_exp": "is harry potter and the escape from gringotts a roller coaster ride",
-            "truth": [0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1],
-            "tokens": ['is', 'harry', 'potter', 'and', 'the', 'escape', 'from', 'gringotts', 'a', 'roller', 'coaster', 'ride'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nHarry Potter and the Escape from Gringotts is an indoor steel roller coaster at Universal Studios Florida, a theme park located within the Universal Orlando Resort. Similar to dark rides, the roller coaster utilizes special effects in a controlled-lighting environment and also employs motion-based 3-D projection of both animation and live-action sequences to enhance the experience. The ride, which is themed to the Gringotts Wizarding Bank, became the flagship attraction for the expanded Wizarding World of Harry Potter when it opened on July 8, 2014.\n\nQuestion:\nis harry potter and the escape from gringotts a roller coaster ride\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Harry', 'Potter', 'and', 'the', 'Escape', 'from', 'Gringotts', 'is', 'an', 'indoor', 'steel', 'roller', 'coaster', 'at', 'Universal', 'Studios', 'Florida,', 'a', 'theme', 'park', 'located', 'within', 'the', 'Universal', 'Orlando', 'Resort.', 'Similar', 'to', 'dark', 'rides,', 'the', 'roller', 'coaster', 'utilizes', 'special', 'effects', 'in', 'a', 'controlled-lighting', 'environment', 'and', 'also', 'employs', 'motion-based', '3-D', 'projection', 'of', 'both', 'animation', 'and', 'live-action', 'sequences', 'to', 'enhance', 'the', 'experience.', 'The', 'ride,', 'which', 'is', 'themed', 'to', 'the', 'Gringotts', 'Wizarding', 'Bank,', 'became', 'the', 'flagship', 'attraction', 'for', 'the', 'expanded', 'Wizarding', 'World', 'of', 'Harry', 'Potter', 'when', 'it', 'opened', 'on', 'July', '8,', '2014.', 'Question:', 'is', 'harry', 'potter', 'and', 'the', 'escape', 'from', 'gringotts', 'a', 'roller', 'coaster', 'ride', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0004": {
-            "ori_exp": "is there a difference between hydroxyzine hcl and hydroxyzine pam",
-            "truth": [0, 1, 0, 1, 1, 1, 1, 0, 1, 1],
-            "tokens": ['is', 'there', 'a', 'difference', 'between', 'hydroxyzine', 'hcl', 'and', 'hydroxyzine', 'pam'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nHydroxyzine preparations require a doctor's prescription. The drug is available in two formulations, the pamoate and the dihydrochloride or hydrochloride salts. Vistaril, Equipose, Masmoran, and Paxistil are preparations of the pamoate salt, while Atarax, Alamon, Aterax, Durrax, Tran-Q, Orgatrax, Quiess, and Tranquizine are of the hydrochloride salt.\n\nQuestion:\nis there a difference between hydroxyzine hcl and hydroxyzine pam\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Hydroxyzine', 'preparations', 'require', 'a', "doctor's", 'prescription.', 'The', 'drug', 'is', 'available', 'in', 'two', 'formulations,', 'the', 'pamoate', 'and', 'the', 'dihydrochloride', 'or', 'hydrochloride', 'salts.', 'Vistaril,', 'Equipose,', 'Masmoran,', 'and', 'Paxistil', 'are', 'preparations', 'of', 'the', 'pamoate', 'salt,', 'while', 'Atarax,', 'Alamon,', 'Aterax,', 'Durrax,', 'Tran-Q,', 'Orgatrax,', 'Quiess,', 'and', 'Tranquizine', 'are', 'of', 'the', 'hydrochloride', 'salt.', 'Question:', 'is', 'there', 'a', 'difference', 'between', 'hydroxyzine', 'hcl', 'and', 'hydroxyzine', 'pam', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0005": {
-            "ori_exp": "is barq's root beer a pepsi product",
-            "truth": [0, 1, 1, 1, 0, 1, 1],
-            "tokens": ['is', "barq's", 'root', 'beer', 'a', 'pepsi', 'product'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nBarq's /ˈbɑːrks/ is an American soft drink. Its brand of root beer is notable for having caffeine. Barq's, created by Edward Barq and bottled since the turn of the 20th century, is owned by the Barq family but bottled by the Coca-Cola Company. It was known as Barq's Famous Olde Tyme Root Beer until 2012.\n\nQuestion:\nis barq's root beer a pepsi product\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', "Barq's", '/ˈbɑːrks/', 'is', 'an', 'American', 'soft', 'drink.', 'Its', 'brand', 'of', 'root', 'beer', 'is', 'notable', 'for', 'having', 'caffeine.', "Barq's,", 'created', 'by', 'Edward', 'Barq', 'and', 'bottled', 'since', 'the', 'turn', 'of', 'the', '20th', 'century,', 'is', 'owned', 'by', 'the', 'Barq', 'family', 'but', 'bottled', 'by', 'the', 'Coca-Cola', 'Company.', 'It', 'was', 'known', 'as', "Barq's", 'Famous', 'Olde', 'Tyme', 'Root', 'Beer', 'until', '2012.', 'Question:', 'is', "barq's", 'root', 'beer', 'a', 'pepsi', 'product', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 0, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 0, 0, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0006": {
-            "ori_exp": "can an odd number be divided by an even number",
-            "truth": [0, 0, 1, 1, 0, 1, 0, 0, 1, 1],
-            "tokens": ['can', 'an', 'odd', 'number', 'be', 'divided', 'by', 'an', 'even', 'number'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nIn mathematics, parity is the property of an integer's inclusion in one of two categories: even or odd. An integer is even if it is evenly divisible by two and odd if it is not even. For example, 6 is even because there is no remainder when dividing it by 2. By contrast, 3, 5, 7, 21 leave a remainder of 1 when divided by 2. Examples of even numbers include −4, 0, 82 and 178. In particular, zero is an even number. Some examples of odd numbers are −5, 3, 29, and 73.\n\nQuestion:\ncan an odd number be divided by an even number\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'In', 'mathematics,', 'parity', 'is', 'the', 'property', 'of', 'an', "integer's", 'inclusion', 'in', 'one', 'of', 'two', 'categories:', 'even', 'or', 'odd.', 'An', 'integer', 'is', 'even', 'if', 'it', 'is', 'evenly', 'divisible', 'by', 'two', 'and', 'odd', 'if', 'it', 'is', 'not', 'even.', 'For', 'example,', '6', 'is', 'even', 'because', 'there', 'is', 'no', 'remainder', 'when', 'dividing', 'it', 'by', '2.', 'By', 'contrast,', '3,', '5,', '7,', '21', 'leave', 'a', 'remainder', 'of', '1', 'when', 'divided', 'by', '2.', 'Examples', 'of', 'even', 'numbers', 'include', '−4,', '0,', '82', 'and', '178.', 'In', 'particular,', 'zero', 'is', 'an', 'even', 'number.', 'Some', 'examples', 'of', 'odd', 'numbers', 'are', '−5,', '3,', '29,', 'and', '73.', 'Question:', 'can', 'an', 'odd', 'number', 'be', 'divided', 'by', 'an', 'even', 'number', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 1, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0007": {
-            "ori_exp": "is there a word with q without u",
-            "truth": [0, 1, 0, 1, 0, 0, 1, 0],
-            "tokens": ['is', 'there', 'a', 'word', 'with', 'q', 'without', 'u'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nOf the 71 words in this list, 67 are nouns, and most would generally be considered loanwords; the only modern-English words that contain Q not followed by U and are not borrowed from another language are qiana, qwerty, and tranq. However, all of the loanwords on this list are considered to be naturalised in English according to at least one major dictionary (see References), often because they refer to concepts or societal roles that do not have an accurate equivalent in English. For words to appear here, they must appear in their own entry in a dictionary; words which occur only as part of a longer phrase are not included.\n\nQuestion:\nis there a word with q without u\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Of', 'the', '71', 'words', 'in', 'this', 'list,', '67', 'are', 'nouns,', 'and', 'most', 'would', 'generally', 'be', 'considered', 'loanwords;', 'the', 'only', 'modern-English', 'words', 'that', 'contain', 'Q', 'not', 'followed', 'by', 'U', 'and', 'are', 'not', 'borrowed', 'from', 'another', 'language', 'are', 'qiana,', 'qwerty,', 'and', 'tranq.', 'However,', 'all', 'of', 'the', 'loanwords', 'on', 'this', 'list', 'are', 'considered', 'to', 'be', 'naturalised', 'in', 'English', 'according', 'to', 'at', 'least', 'one', 'major', 'dictionary', '(see', 'References),', 'often', 'because', 'they', 'refer', 'to', 'concepts', 'or', 'societal', 'roles', 'that', 'do', 'not', 'have', 'an', 'accurate', 'equivalent', 'in', 'English.', 'For', 'words', 'to', 'appear', 'here,', 'they', 'must', 'appear', 'in', 'their', 'own', 'entry', 'in', 'a', 'dictionary;', 'words', 'which', 'occur', 'only', 'as', 'part', 'of', 'a', 'longer', 'phrase', 'are', 'not', 'included.', 'Question:', 'is', 'there', 'a', 'word', 'with', 'q', 'without', 'u', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 1, 0, 1, 1, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 0, 1, 0, 1, 1, 1, 0, 1, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0008": {
-            "ori_exp": "can u drive in canada with us license",
-            "truth": [0, 0, 1, 0, 1, 0, 0, 1],
-            "tokens": ['can', 'u', 'drive', 'in', 'canada', 'with', 'us', 'license'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nPersons driving into Canada must have their vehicle's registration document and proof of insurance.\n\nQuestion:\ncan u drive in canada with us license\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'Persons', 'driving', 'into', 'Canada', 'must', 'have', 'their', "vehicle's", 'registration', 'document', 'and', 'proof', 'of', 'insurance.', 'Question:', 'can', 'u', 'drive', 'in', 'canada', 'with', 'us', 'license', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 1, 1, 1, 1, 0, 0, 1, 1, 1, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-        "validation_0009": {
-            "ori_exp": "is there a play off for third place in the world cup",
-            "truth": [0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1],
-            "tokens": ['is', 'there', 'a', 'play', 'off', 'for', 'third', 'place', 'in', 'the', 'world', 'cup'],
-            "category": "boolq_target",
-            "full_prompt": "Passage:\nThe knockout stage of the 2018 FIFA World Cup was the second and final stage of the competition, following the group stage. It began on 30 June with the round of 16 and ended on 15 July with the final match, held at the Luzhniki Stadium in Moscow. The top two teams from each group (16 in total) advanced to the knockout stage to compete in a single-elimination style tournament. A third place play-off was also played between the two losing teams of the semi-finals.\n\nQuestion:\nis there a play off for third place in the world cup\n\nIs the answer False or True?\nAnswer:",
-            "full_tokens": ['Passage:', 'The', 'knockout', 'stage', 'of', 'the', '2018', 'FIFA', 'World', 'Cup', 'was', 'the', 'second', 'and', 'final', 'stage', 'of', 'the', 'competition,', 'following', 'the', 'group', 'stage.', 'It', 'began', 'on', '30', 'June', 'with', 'the', 'round', 'of', '16', 'and', 'ended', 'on', '15', 'July', 'with', 'the', 'final', 'match,', 'held', 'at', 'the', 'Luzhniki', 'Stadium', 'in', 'Moscow.', 'The', 'top', 'two', 'teams', 'from', 'each', 'group', '(16', 'in', 'total)', 'advanced', 'to', 'the', 'knockout', 'stage', 'to', 'compete', 'in', 'a', 'single-elimination', 'style', 'tournament.', 'A', 'third', 'place', 'play-off', 'was', 'also', 'played', 'between', 'the', 'two', 'losing', 'teams', 'of', 'the', 'semi-finals.', 'Question:', 'is', 'there', 'a', 'play', 'off', 'for', 'third', 'place', 'in', 'the', 'world', 'cup', 'Is', 'the', 'answer', 'False', 'or', 'True?', 'Answer:'],
-            "full_truth": [0, 0, 1, 1, 0, 0, 1, 1, 1, 1, 0, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0, 0, 1, 1, 1, 0, 0, 1, 1, 0, 1, 0, 1, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0],
-        },
-    },
-}
-
-
-
-
 class GroundTruthRegistry:
-    """Centralized registry managing manually defined ground-truth annotations.
+    """Centralized registry managing automated and external ground-truth annotations.
 
     Attributes:
         _registry: Nested mapping of `dataset_key -> sample_id -> GroundTruthAnnotation`.
+        _extractor: Automated `GroundTruthExtractor` instance for on-the-fly sample extraction.
     """
 
-    def __init__(self) -> None:
-        """Initialize the registry and populate it with curated default benchmark annotations."""
+    def __init__(
+        self,
+        full_prompt_strategy: str | BaseGroundTruthStrategy = "content_words",
+    ) -> None:
+        """Initialize the registry with an automated ground-truth extractor (no static dictionary preload)."""
         self._registry: dict[str, dict[str, GroundTruthAnnotation]] = {}
-        self.load_default_annotations()
+        self._extractor: GroundTruthExtractor = GroundTruthExtractor(
+            full_prompt_strategy=full_prompt_strategy
+        )
 
-    def load_default_annotations(self) -> None:
-        """Populate the registry with curated default benchmark annotations from `DEFAULT_GROUND_TRUTH_DATA`.
+    def populate_from_datasets(
+        self,
+        datasets: list[str] | tuple[str, ...] | None = None,
+        split: str = "validation",
+        num_samples: int = 10,
+    ) -> int:
+        """Populate the registry dynamically from benchmark datasets via `inspect_and_generate_ground_truth`.
+
+        Args:
+            datasets: Optional list of dataset keys to populate.
+            split: Dataset split name ('validation', 'test', 'train').
+            num_samples: Number of samples per dataset to extract.
 
         Returns:
-            None: Registers all default sample annotations in place.
+            int: Total number of sample annotations registered.
         """
-        for ds_key, samples in DEFAULT_GROUND_TRUTH_DATA.items():
+        gt_res = inspect_and_generate_ground_truth(
+            datasets=list(datasets) if datasets is not None else None,
+            split=split,
+            num_samples=num_samples,
+            full_prompt_strategy=self._extractor.full_prompt_strategy,
+            print_inspection=False,
+            print_copyable=False,
+        )
+        count = 0
+        for ds_key, samples in gt_res.unified.items():
             for s_id, payload in samples.items():
                 self.register(
                     GroundTruthAnnotation(
@@ -7187,7 +7194,7 @@ class GroundTruthRegistry:
                         ori_exp=payload["ori_exp"],
                         truth=payload["truth"],
                         tokens=payload.get("tokens", []),
-                        category=payload.get("category", ""),
+                        category=payload.get("category", f"{ds_key}_target"),
                         full_prompt=payload.get("full_prompt", ""),
                         full_truth=payload.get("full_truth", []),
                         full_tokens=payload.get("full_tokens", []),
@@ -7195,6 +7202,68 @@ class GroundTruthRegistry:
                         perturbation_mode=PerturbationMode.GOAL,
                     )
                 )
+                count += 1
+        return count
+
+    def load_default_annotations(
+        self,
+        datasets: list[str] | tuple[str, ...] | None = None,
+        split: str = "validation",
+        num_samples: int = 10,
+    ) -> int:
+        """Optionally populate annotations dynamically via `populate_from_datasets` when requested."""
+        return self.populate_from_datasets(datasets=datasets, split=split, num_samples=num_samples)
+
+    def extract_and_register(
+        self,
+        dataset_key: str,
+        sample_id: str,
+        example_record: dict[str, Any] | None = None,
+        prompt_text: str = "",
+    ) -> GroundTruthAnnotation:
+        """Extract ground-truth labels for a sample via `GroundTruthExtractor` and register in `self._registry`.
+
+        Args:
+            dataset_key: Benchmark dataset key.
+            sample_id: Sample identifier (e.g. 'validation_0000').
+            example_record: Raw dataset example dictionary.
+            prompt_text: Fallback full prompt text if `example_record` is empty or lacks `'goal'`.
+
+        Returns:
+            GroundTruthAnnotation: Newly extracted and registered ground-truth annotation.
+        """
+        ds_key = dataset_key.lower().strip()
+        s_id = sample_id.strip()
+        if isinstance(example_record, dict) and example_record.get("goal"):
+            eff_example = dict(example_record)
+        else:
+            eff_example = {
+                "goal": str(prompt_text or "").strip(),
+                "sol1": str(example_record.get("sol1", "") if isinstance(example_record, dict) else ""),
+                "sol2": str(example_record.get("sol2", "") if isinstance(example_record, dict) else ""),
+                "label": example_record.get("label", 0) if isinstance(example_record, dict) else 0,
+            }
+
+        record = self._extractor.process_sample(
+            example=eff_example,
+            dataset_name=ds_key,
+            sample_id=s_id,
+        )
+        ann = GroundTruthAnnotation(
+            dataset_key=ds_key,
+            sample_id=s_id,
+            ori_exp=record.goal_text,
+            truth=record.goal_truth,
+            tokens=record.goal_tokens,
+            category=f"{ds_key}_target",
+            full_prompt=record.full_prompt_text,
+            full_truth=record.full_prompt_truth,
+            full_tokens=record.full_prompt_tokens,
+            is_scoped=True,
+            perturbation_mode=PerturbationMode.GOAL,
+        )
+        self.register(ann)
+        return ann
 
     def register(self, annotation: GroundTruthAnnotation) -> None:
         """Register or update a ground-truth annotation for a dataset sample.
@@ -7260,7 +7329,6 @@ class GroundTruthRegistry:
         if not path.is_file():
             LOGGER.warning("Ground truth file %s not found.", path)
             return 0
-        import json
         data = json.loads(path.read_text(encoding="utf-8"))
         count = 0
         for ds_key, samples in data.items():
@@ -7295,7 +7363,6 @@ class GroundTruthRegistry:
         Returns:
             None: Writes the JSON file to disk.
         """
-        import json
         export_data: dict[str, dict[str, Any]] = {}
         for ds_key, samples in self._registry.items():
             export_data[ds_key] = {}
@@ -7317,49 +7384,6 @@ class GroundTruthRegistry:
 GLOBAL_GROUND_TRUTH_REGISTRY: Final[GroundTruthRegistry] = GroundTruthRegistry()
 
 
-def _label_unseen_token_relevance(
-    token: str,
-    inside_content_span: bool = True,
-    rank_lookup: dict[str, int] | None = None,
-) -> int:
-    """Assign a general linguistic reference label (1 for open-class content, 0 for closed-class/framing).
-
-    Uses corpus Zipfian rank `r_i < 450` from `word2vec-google-news-300` (`_original_key_to_index`)
-    and orthographic length/character properties with zero hardcoded word lists. Used exclusively
-    when evaluating unseen dataset splits, sample indices >= 10, or custom user prompts that are
-    not present in `DEFAULT_GROUND_TRUTH_DATA`.
-
-    Args:
-        token: Raw whitespace token string.
-        inside_content_span: True if the token lies within the dataset's content spans.
-        rank_lookup: Optional mapping of token strings to pretrained Word2Vec corpus ranks.
-
-    Returns:
-        int: `1` for open-class lexical content tokens, `0` for framing/closed-class/punctuation tokens.
-    """
-    if not inside_content_span:
-        return 0
-    raw_t = str(token).strip()
-    stripped = re.sub(r"^[\W_]+|[\W_]+$", "", raw_t, flags=re.UNICODE)
-    if not stripped:
-        return 0
-    alnum = [c for c in stripped if c.isalnum()]
-    if len(alnum) <= 2 or all(c.isdigit() for c in alnum):
-        return 0
-    if rank_lookup is None:
-        wv_m = _extract_underlying_wv_model(_SHARED_XWHY_EMBEDDING_MODEL)
-        if wv_m is not None:
-            orig_map = getattr(wv_m, "_original_key_to_index", None)
-            k2i_map = getattr(wv_m, "key_to_index", None)
-            if isinstance(orig_map, dict) and len(orig_map) > 0:
-                rank_lookup = orig_map
-            elif isinstance(k2i_map, dict) and len(k2i_map) > 0:
-                rank_lookup = k2i_map
-    if isinstance(rank_lookup, dict) and int(rank_lookup.get(stripped.lower(), 25000)) < 450:
-        return 0
-    return 1
-
-
 def get_or_create_ground_truth(
     registry: GroundTruthRegistry,
     dataset_key: str,
@@ -7371,19 +7395,10 @@ def get_or_create_ground_truth(
     importance_indices: list[int] | None = None,
     enable_scoped_perturbation: bool | None = None,
 ) -> GroundTruthAnnotation | None:
-    """Retrieve the registered ground-truth annotation or construct an independent linguistic reference for unseen data.
-
-    1. When `raw_ann = registry.get(dataset_key, sample_id)` is found and matches the prompt text
-       (the 60 curated benchmark samples), returns `raw_ann.for_scope(...)` from `DEFAULT_GROUND_TRUTH_DATA`.
-    2. When `raw_ann` is `None` or does not match `example_record` / `prompt_text` (e.g., when
-       evaluating unseen dataset splits, sample indices >= 10, or custom user prompts), constructs
-       an independent linguistic reference `GroundTruthAnnotation` using `build_benchmark_prompt`
-       character spans and Word2Vec Zipfian corpus ranks (`r_i < 450`) to label template framing
-       and closed-class function words as `0` and open-class lexical content words as `1`,
-       projected onto `resolved_mode`.
+    """Retrieve or automatically extract and register the ground-truth annotation for a dataset sample.
 
     Args:
-        registry: GroundTruthRegistry instance containing curated benchmark annotations.
+        registry: GroundTruthRegistry instance managing automated ground-truth extraction.
         dataset_key: Benchmark dataset key.
         sample_id: Sample identifier (e.g. 'validation_0000').
         example_record: Dataset record dictionary containing 'goal', 'sol1', etc.
@@ -7397,126 +7412,34 @@ def get_or_create_ground_truth(
         GroundTruthAnnotation | None: Resolved ground-truth annotation for the active scope.
     """
     resolved_mode = resolve_perturbation_mode(mode, enable_scoped_perturbation)
-    raw_ann = registry.get(dataset_key, sample_id) if registry is not None else None
-
-    if raw_ann is not None:
-        matches_curated = True
-        if isinstance(example_record, dict) and example_record.get("goal"):
+    active_registry = registry if registry is not None else GLOBAL_GROUND_TRUTH_REGISTRY
+    ann = active_registry.get(dataset_key, sample_id)
+    if ann is None or (isinstance(example_record, dict) and example_record.get("goal")):
+        if ann is not None and isinstance(example_record, dict) and example_record.get("goal"):
             rec_goal = " ".join(str(example_record.get("goal", "")).split()).strip().lower()
-            ann_goal = " ".join(str(raw_ann.ori_exp).split()).strip().lower()
-            if rec_goal and ann_goal and rec_goal != ann_goal:
-                matches_curated = False
-        if matches_curated and prompt_text and str(prompt_text).strip():
-            norm_p = " ".join(str(prompt_text).split()).strip().lower()
-            norm_full = " ".join(str(raw_ann.full_prompt or raw_ann.ori_exp).split()).strip().lower()
-            norm_ori = " ".join(str(raw_ann.ori_exp).split()).strip().lower()
-            if norm_full and norm_p != norm_full and norm_ori not in norm_p:
-                matches_curated = False
-
-        if matches_curated:
-            return raw_ann.for_scope(
-                mode=resolved_mode,
-                importance_tokens=importance_tokens,
-                importance_indices=importance_indices,
+            ann_goal = " ".join(str(ann.ori_exp).split()).strip().lower()
+            if rec_goal != ann_goal:
+                ann = active_registry.extract_and_register(
+                    dataset_key=dataset_key,
+                    sample_id=sample_id,
+                    example_record=example_record,
+                    prompt_text=prompt_text,
+                )
+        elif ann is None:
+            if not (isinstance(example_record, dict) and example_record.get("goal")) and not str(prompt_text or "").strip():
+                return None
+            ann = active_registry.extract_and_register(
+                dataset_key=dataset_key,
+                sample_id=sample_id,
+                example_record=example_record,
+                prompt_text=prompt_text,
             )
 
-    # Unseen dataset split, sample index >= 10, or custom user prompt: build independent linguistic reference
-    spans_map: dict[str, tuple[int, int]] = {}
-    built_prompt = str(prompt_text or "").strip()
-    if isinstance(example_record, dict) and example_record:
-        try:
-            bp, sp = build_benchmark_prompt(example_record, dataset_key)
-            if not built_prompt:
-                built_prompt = bp
-            if bp == built_prompt:
-                spans_map = sp
-        except Exception:
-            pass
-
-    goal_text = str(example_record.get("goal", "") if isinstance(example_record, dict) else "").strip()
-    if not goal_text:
-        goal_text = built_prompt
-    if not built_prompt:
-        built_prompt = goal_text
-
-    goal_tokens = [w for w in goal_text.split() if w]
-    full_tokens = [w for w in built_prompt.split() if w]
-    if not goal_tokens and not full_tokens:
-        return None
-    if not goal_tokens:
-        goal_tokens = list(full_tokens)
-    if not full_tokens:
-        full_tokens = list(goal_tokens)
-
-    wv_m = _extract_underlying_wv_model(_SHARED_XWHY_EMBEDDING_MODEL)
-    rank_lookup: dict[str, int] | None = None
-    if wv_m is not None:
-        orig_map = getattr(wv_m, "_original_key_to_index", None)
-        k2i_map = getattr(wv_m, "key_to_index", None)
-        if isinstance(orig_map, dict) and len(orig_map) > 0:
-            rank_lookup = orig_map
-        elif isinstance(k2i_map, dict) and len(k2i_map) > 0:
-            rank_lookup = k2i_map
-
-    goal_truth = [
-        _label_unseen_token_relevance(w, inside_content_span=True, rank_lookup=rank_lookup)
-        for w in goal_tokens
-    ]
-    if not any(v == 1 for v in goal_truth) and goal_tokens:
-        goal_truth[-1] = 1
-
-    content_spans = [
-        (int(s), int(e))
-        for s, e in spans_map.values()
-        if int(e) > int(s)
-    ]
-    if content_spans:
-        w_spans = _compute_word_char_spans(text=built_prompt, target_words=full_tokens)
-        inside_flags = [
-            any(min(we, ce) > max(ws, cs) for cs, ce in content_spans)
-            for ws, we in w_spans
-        ]
-    else:
-        inside_flags = [True] * len(full_tokens)
-
-    full_truth = [
-        _label_unseen_token_relevance(w, inside_content_span=flag, rank_lookup=rank_lookup)
-        for w, flag in zip(full_tokens, inside_flags)
-    ]
-    if not any(v == 1 for v in full_truth) and full_tokens:
-        full_truth[-1] = 1
-
-    synth_ann = GroundTruthAnnotation(
-        dataset_key=dataset_key,
-        sample_id=sample_id,
-        ori_exp=" ".join(goal_tokens),
-        truth=goal_truth,
-        tokens=goal_tokens,
-        category=f"{dataset_key}_unseen_linguistic_ref",
-        full_prompt=" ".join(full_tokens),
-        full_truth=full_truth,
-        full_tokens=full_tokens,
-        is_scoped=(resolved_mode != PerturbationMode.FULL_PROMPT),
-        perturbation_mode=resolved_mode,
-    )
-    return synth_ann.for_scope(
+    return ann.for_scope(
         mode=resolved_mode,
         importance_tokens=importance_tokens,
         importance_indices=importance_indices,
     )
-
-
-def _normalize_token(t: str) -> str:
-    """Normalize a word token by stripping boundary punctuation and lowercasing for alignment.
-
-    Args:
-        t: Raw token string.
-
-    Returns:
-        str: Normalized lowercase token string.
-    """
-    import re
-    return re.sub(r"^[\W_]+|[\W_]+$", "", str(t), flags=re.UNICODE).lower()
 
 
 def align_ground_truth_with_features(
@@ -7529,7 +7452,7 @@ def align_ground_truth_with_features(
     matches on unrelated token sequences.
 
     Args:
-        annotation: Manually defined ground-truth annotation.
+        annotation: Ground-truth annotation.
         feature_names: Feature names returned in the XWhy explanation result.
 
     Returns:
@@ -9711,7 +9634,7 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.4"
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.5"
 
 
 def compute_experiment_fingerprint(
@@ -9743,7 +9666,7 @@ def compute_experiment_fingerprint(
         seed: Random seed governing perturbations.
         num_perturbations: Number of perturbations configured for the run.
         importance_words: Optional list of extracted importance words.
-        schema_version: Pipeline checkpoint schema version ('4.3.4').
+        schema_version: Pipeline checkpoint schema version ('4.3.5').
 
     Returns:
         str: Hexadecimal SHA-256 experiment fingerprint.
@@ -10185,6 +10108,22 @@ def run_xwhy_on_dataset_samples(
             )
             artifacts.append(sample_art)
 
+            loaded_from_checkpoint = False
+            if (
+                not loaded_from_checkpoint
+                and is_cloud_rate_limited_provider(provider)
+                and idx < total_samples
+                and CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS > 0
+            ):
+                LOGGER.info(
+                    "Cloud provider (%s) per-sample rate-limit delay: sleeping %.1fs before sample %d/%d...",
+                    enum_to_str(provider),
+                    float(CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS),
+                    idx + 1,
+                    total_samples,
+                )
+                time.sleep(float(CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS))
+
         except Exception as exc:  # noqa: BLE001
             LOGGER.error("Error during XWhy explanation for %s/%s: %s", dataset_key, sample_id, exc)
         finally:
@@ -10526,7 +10465,37 @@ DEFAULT_MODELS: Final[list[ModelConfig]] = [
         provider=getattr(ProviderType, "OLLAMA", "ollama"),
         model_name="gemma3:4b",
         display_name="ollama_gemma3_4b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="gemma4:e2b",
+        display_name="ollama_gemma4_e2b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="gemma4:e4b",
+        display_name="ollama_gemma4_e4b",
         enabled=True,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="llama3.2:1b",
+        display_name="ollama_llama3_2_1b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="llama3.2:3b",
+        display_name="ollama_llama3_2_3b",
+        enabled=True,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="llama3.1:8b",
+        display_name="ollama_llama3_1_8b",
+        enabled=False,
     ),
     ModelConfig(
         provider=getattr(ProviderType, "OLLAMA", "ollama"),
@@ -10538,6 +10507,30 @@ DEFAULT_MODELS: Final[list[ModelConfig]] = [
         provider=getattr(ProviderType, "OLLAMA", "ollama"),
         model_name="qwen3:1.7b",
         display_name="ollama_qwen3_1_7b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="qwen3:8b",
+        display_name="ollama_qwen3_8b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="qwen2.5:1.5b",
+        display_name="ollama_qwen2_5_1_5b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="qwen2.5:3b",
+        display_name="ollama_qwen2_5_3b",
+        enabled=False,
+    ),
+    ModelConfig(
+        provider=getattr(ProviderType, "OLLAMA", "ollama"),
+        model_name="phi3:mini",
+        display_name="ollama_phi3_mini",
         enabled=True,
     ),
     # OpenAI Provider
@@ -10562,6 +10555,23 @@ DEFAULT_MODELS: Final[list[ModelConfig]] = [
         enabled=False,  # Toggle to True when ANTHROPIC_API_KEY is configured
     ),
 ]
+
+DEFAULT_MODEL_CONFIGS: Final[list[ModelConfig]] = DEFAULT_MODELS
+
+
+def get_default_model_configs() -> list[ModelConfig]:
+    """Return a fresh list of default ModelConfig entries across all supported open-weight and cloud models."""
+    return [
+        ModelConfig(
+            provider=m.provider,
+            model_name=m.model_name,
+            display_name=m.display_name,
+            enabled=m.enabled,
+            max_tokens_override=m.max_tokens_override,
+            extra_kwargs=dict(m.extra_kwargs),
+        )
+        for m in DEFAULT_MODELS
+    ]
 
 
 def log_all_metric_markdown_tables(
@@ -10930,9 +10940,8 @@ def run_pipeline(
                 LOGGER.error("Credential validation failed for '%s': %s", model_cfg.display_name, val_err)
                 continue
 
-        for ds_name, examples in loaded_datasets.items():
-            if not examples:
-                continue
+        non_empty_ds_items = [(dn, exs) for dn, exs in loaded_datasets.items() if exs]
+        for ds_idx, (ds_name, examples) in enumerate(non_empty_ds_items):
 
             ds_config = DATASET_XWHY_CONFIG.get(
                 ds_name, {"max_tokens": 128, "distance_type": DistanceType.WMD}
@@ -11025,6 +11034,20 @@ def run_pipeline(
                     model_cfg.display_name,
                     ds_name,
                 )
+
+            if (
+                is_cloud_rate_limited_provider(model_cfg.provider)
+                and ds_idx + 1 < len(non_empty_ds_items)
+                and CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS > 0
+            ):
+                next_ds_name = non_empty_ds_items[ds_idx + 1][0]
+                LOGGER.info(
+                    "Cloud provider (%s) inter-dataset rate-limit delay: sleeping %.1fs before dataset '%s'...",
+                    enum_to_str(model_cfg.provider),
+                    float(CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS),
+                    next_ds_name,
+                )
+                time.sleep(float(CLOUD_PROVIDER_SAMPLE_DELAY_SECONDS))
 
         if "ollama" in prov_val.lower():
             unload_ollama_models_from_vram()
