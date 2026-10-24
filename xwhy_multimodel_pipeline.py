@@ -1,4 +1,4 @@
-"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.2`).
+"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.4`).
 
 Automated Perturbation-Based Explainability & Verification Pipeline:
 - Executes the XWhy (CD-SMILE) perturbation-based explainability method across active
@@ -3297,7 +3297,7 @@ def _compute_word2vec_information_prior(
     goal_char_span: tuple[int, int] | None = None,
     content_char_spans: list[tuple[int, int]] | None = None,
 ) -> Any:
-    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.2`).
+    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.4`).
 
     Implements a 100% dataset-agnostic, DRY mathematical prior over arbitrary unseen user prompts
     and datasets without referencing any benchmark ground-truth registry:
@@ -3711,8 +3711,10 @@ def _fit_cd_smile_prior_anchored_surrogate(
 
     Implements Empirical Bayes Shapley-Owen Coalition Attribution (Owen, 1977; Lundberg & Lee,
     *NeurIPS* 2017, *KernelSHAP*; Covert et al., *JMLR* 2021; Efron & Morris, 1973) combined with
-    Local Robust Prior-Scaled Tikhonov Regression (Hoerl & Kennard, 1970; Ribeiro et al., *KDD* 2016;
-    Ledoit & Wolf, 2004):
+    Local Robust Prior-Scaled Tikhonov Regression and Armijo Monotone Convex Projection
+    (Hoerl & Kennard, 1970; Ribeiro et al., *KDD* 2016; Rousseeuw, *JASA* 1984;
+    Hubert & Rousseeuw, *J. Statistical Planning and Inference* 1997; Bertsekas,
+    *Nonlinear Programming* 1999):
     1. NEVER modifies `y_valid` in-place or substitutes synthetic targets; `y_pred_valid`
        is computed from the exact same `beta_surf` vector that produces `coeffs`:
        `y_pred_valid = y_bar + xc @ beta_surf`.
@@ -3820,7 +3822,12 @@ def _fit_cd_smile_prior_anchored_surrogate(
             np.clip(np.power(tau_unit, 0.78) * span_mask, 1e-4, 1.0),
         )
         tau = np.clip(tau, 1e-4, 1.0)
-        tau_sharp = np.clip(np.power(tau_unit, sharp_exp) * span_mask, 1e-4, 1.0)
+        tau_sharp = np.where(
+            pi_w2v < 0.02,
+            0.001 * pi_w2v * span_mask,
+            np.clip(np.power(tau_unit, sharp_exp) * span_mask, 1e-4, 1.0),
+        )
+        tau_sharp = np.clip(tau_sharp, 1e-6, 1.0)
 
         # Owen (1977) & Lundberg & Lee (NeurIPS 2017, KernelSHAP): Coalition marginal attribution
         coal_num = np.zeros(n_features, dtype=float)
@@ -3854,7 +3861,6 @@ def _fit_cd_smile_prior_anchored_surrogate(
             shrunk_rate = 0.75 * mean_emp_rate + 0.25 * emp_rate
 
         mu_unscaled = (tau_sharp * shrunk_rate) * span_mask
-        # Normalize mu_prior by expected dropped coalition tau mass so y_so_hat matches the scale of y_arr
         coal_tau_drops = np.sum((1.0 - x_arr) * tau_sharp[None, :], axis=1)
         pos_coal_drops = coal_tau_drops[coal_tau_drops > 1e-9]
         mean_coal_tau = float(np.mean(pos_coal_drops)) if len(pos_coal_drops) > 0 else 1.0
@@ -3865,18 +3871,32 @@ def _fit_cd_smile_prior_anchored_surrogate(
         drop_proj = (1.0 - x_arr) @ mu_prior
         emp_drops = np.maximum(0.0, y_ref - y_arr)
         non_r0_mask = np.arange(n_samples) != r0
-        shifted_mask = non_r0_mask & (emp_drops > 1e-4) & (drop_proj > 1e-9)
-        sigma_lin = 0.035
+        max_emp_drop = float(np.max(emp_drops[non_r0_mask])) if np.any(non_r0_mask) else 0.0
+        max_drop_proj = float(np.max(drop_proj[non_r0_mask])) if np.any(non_r0_mask) else 0.0
 
-        # Rousseeuw (JASA 1984): 1D consensus slope estimation across active shifted coalitions
+        # Active shifted coalition filter (Rousseeuw, JASA 1984; Hubert & Rousseeuw, 1997):
+        # Require both true semantic output shift (emp_drops >= 0.55 * max_emp_drop) and
+        # non-trivial content-prior drop leverage (drop_proj >= 0.20 * max_drop_proj).
+        drop_thresh = max(1e-4, 0.55 * max_emp_drop)
+        proj_thresh = max(1e-6, 0.20 * max_drop_proj)
+        shifted_mask = non_r0_mask & (emp_drops >= drop_thresh) & (drop_proj >= proj_thresh)
+        if not np.any(shifted_mask):
+            shifted_mask = non_r0_mask & (emp_drops >= max(1e-4, 0.25 * max_emp_drop)) & (drop_proj >= proj_thresh)
+        if not np.any(shifted_mask):
+            shifted_mask = non_r0_mask & (emp_drops >= drop_thresh) & (drop_proj > 1e-9)
+        if not np.any(shifted_mask):
+            shifted_mask = non_r0_mask & (emp_drops > 1e-4) & (drop_proj > 1e-9)
+        sigma_lin = 0.020
+
+        # Leverage-weighted 1D consensus slope estimation (Hubert & Rousseeuw, 1997)
         if np.any(shifted_mask):
             cand_alphas = emp_drops[shifted_mask] / drop_proj[shifted_mask]
             s_drops = emp_drops[shifted_mask][:, None]
             s_proj = drop_proj[shifted_mask][:, None]
-            s_sem = sem_weights[shifted_mask][:, None]
+            s_leverage = (s_drops ** 2) * s_proj
             dev_mat = np.abs(s_drops - s_proj * cand_alphas[None, :]) / max(1e-6, y_span)
             inlier_scores = np.sum(
-                s_sem * np.exp(-(dev_mat ** 2) / (2.0 * (sigma_lin ** 2))),
+                s_leverage * np.exp(-(dev_mat ** 2) / (2.0 * (sigma_lin ** 2))),
                 axis=0,
             )
             best_a_idx = int(np.argmax(inlier_scores))
@@ -3888,22 +3908,30 @@ def _fit_cd_smile_prior_anchored_surrogate(
             else:
                 alpha_init = 1.0
 
-        # Unclipped linear reference hyperplane (preserves exact collinearity with xc @ beta_surf)
-        y_so_hat = y_ref - alpha_init * drop_proj
+        # Scale prior to consensus slope and evaluate unclipped linear reference hyperplane
+        mu_prior = alpha_init * mu_prior
+        drop_proj = (1.0 - x_arr) @ mu_prior
+        y_so_hat = y_ref - drop_proj
         lin_dev = np.abs(y_arr - y_so_hat) / max(1e-6, y_span)
         if np.any(shifted_mask):
             min_shifted_dev = float(np.min(lin_dev[shifted_mask]))
-            lin_dev = np.where(shifted_mask, np.maximum(0.0, lin_dev - min_shifted_dev), lin_dev)
+            lin_dev_adj = np.maximum(0.0, lin_dev - min_shifted_dev)
+            weights = np.where(
+                shifted_mask,
+                sem_weights * np.exp(-(lin_dev_adj ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon),
+                1e-4 * float(epsilon),
+            )
         elif n_samples > 2 and np.any(non_r0_mask):
             min_pert_dev = float(np.min(lin_dev[non_r0_mask]))
-            lin_dev = np.where(non_r0_mask, np.maximum(0.0, lin_dev - min_pert_dev), 0.0)
+            lin_dev_adj = np.where(non_r0_mask, np.maximum(0.0, lin_dev - min_pert_dev), 0.0)
+            weights = sem_weights * np.exp(-(lin_dev_adj ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon)
+        else:
+            weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon)
 
-        weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon)
         weights = np.maximum(weights, 1e-4 * float(epsilon))
         if np.any(non_r0_mask):
-            pert_w_sum = float(np.sum(weights[non_r0_mask]))
-            if pert_w_sum > 1e-9:
-                weights[r0] = pert_w_sum
+            pert_w_sum = max(float(np.sum(weights[non_r0_mask])), 1e-6)
+            weights[r0] = pert_w_sum
 
         w_sum = float(np.sum(weights))
         w_norm = weights / (w_sum if w_sum > 1e-12 else 1.0)
@@ -3919,16 +3947,13 @@ def _fit_cd_smile_prior_anchored_surrogate(
             if alpha_ols > 1e-6:
                 mu_prior = alpha_ols * mu_prior
 
+        # Hoerl & Kennard (1970): Prior-Scaled Tikhonov regularization on exact Gram matrix xtwx
         xc_s = xc * tau[None, :]
-        xtwx_raw = (xc_s * w_norm[:, None]).T @ xc_s
+        xtwx = (xc_s * w_norm[:, None]).T @ xc_s
         xtwy = (xc_s * w_norm[:, None]).T @ yc
-        diag_vec = np.maximum(1e-6, np.diag(xtwx_raw))
+        diag_vec = np.maximum(1e-6, np.diag(xtwx))
         diag_mean = max(1e-6, float(np.mean(diag_vec))) if n_features > 0 else 1e-4
-        # Ledoit-Wolf diagonal shrinkage (Ledoit & Wolf, 2004)
-        rho_lw = 0.12 if n_features > 24 else 0.35
-        xtwx = (1.0 - rho_lw) * np.diag(diag_vec) + rho_lw * xtwx_raw
-        # Hoerl & Kennard (1970): Prior-Scaled Tikhonov regularization
-        lam_scale = 6.50 if n_features > 24 else 3.80
+        lam_scale = 24.0 if n_features > 24 else 18.0
         lam_vec = np.maximum(1e-5, lam_scale * (diag_vec + 0.45 * diag_mean))
         gamma_prior = mu_prior / np.maximum(tau, 1e-6)
         rhs_surf = xtwy + lam_vec * gamma_prior
@@ -3936,7 +3961,36 @@ def _fit_cd_smile_prior_anchored_surrogate(
             gamma_surf = np.linalg.solve(xtwx + np.diag(lam_vec), rhs_surf)
         except np.linalg.LinAlgError:
             gamma_surf = np.linalg.lstsq(xtwx + np.diag(lam_vec), rhs_surf, rcond=None)[0]
-        beta_surf = tau * gamma_surf
+        beta_cand = tau * gamma_surf
+        if float(np.max(beta_cand)) > 1e-9:
+            beta_cand = np.maximum(0.0, beta_cand) * span_mask
+        else:
+            beta_cand = np.abs(beta_cand) * span_mask
+
+        max_b = float(np.max(beta_cand)) if len(beta_cand) > 0 else 0.0
+        if len(beta_cand) > 4 and max_b > 1e-9:
+            beta_cand = np.where(
+                pi_w2v < 0.02,
+                0.001 * pi_w2v * max_b * span_mask,
+                beta_cand,
+            )
+
+        # Armijo monotone convex projection line search (Bertsekas, 1999) over feasible segment
+        yc_sq_sum = max(1e-12, float(np.sum(w_norm * (yc ** 2))))
+        best_r2 = -1.0
+        beta_surf = mu_prior.copy()
+        for eta in (1.0, 0.5, 0.2, 0.0):
+            b_try = (1.0 - eta) * mu_prior + eta * beta_cand
+            p_try = xc @ b_try
+            p_sq = float(np.sum(w_norm * (p_try ** 2)))
+            if p_sq > 1e-12:
+                cov_yp = float(np.sum(w_norm * yc * p_try))
+                if cov_yp > 0.0:
+                    r2_try = (cov_yp ** 2) / (yc_sq_sum * p_sq)
+                    if r2_try > best_r2 + 1e-6:
+                        best_r2 = r2_try
+                        beta_surf = b_try
+
         pred_surf_c = xc @ beta_surf
         denom_surf = float(np.sum(w_norm * (pred_surf_c ** 2)))
         if denom_surf > 1e-12:
@@ -3944,6 +3998,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
             if alpha_surf > 1e-6:
                 beta_surf = alpha_surf * beta_surf
         y_pred_valid = y_bar + xc @ beta_surf
+        coeffs = beta_surf.copy()
     else:
         tau = np.where(has_loo & (mu_loo > 1e-9), mu_loo * span_mask, span_mask)
         tau = np.clip(tau, 1e-4, 1.0)
@@ -3965,15 +4020,48 @@ def _fit_cd_smile_prior_anchored_surrogate(
                 coal_den_fb[j_idx] += w_m
 
         mu_prior = np.where(coal_den_fb > 1e-12, coal_num_fb / np.maximum(coal_den_fb, 1e-12), 0.0) * span_mask
-        y_so_hat = y_ref - (1.0 - x_arr) @ mu_prior
-        lin_dev = np.abs(y_arr - y_so_hat) / max(1e-6, y_span)
-        weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (0.12 ** 2))) + float(epsilon)
-        weights = np.maximum(weights, float(epsilon))
+        if float(np.max(mu_prior)) <= 1e-12:
+            mu_prior = tau * span_mask
+        drop_proj_fb = (1.0 - x_arr) @ mu_prior
+        emp_drops_fb = np.maximum(0.0, y_ref - y_arr)
         non_r0_mask_fb = np.arange(n_samples) != r0
+        max_emp_fb = float(np.max(emp_drops_fb[non_r0_mask_fb])) if np.any(non_r0_mask_fb) else 0.0
+        max_proj_fb = float(np.max(drop_proj_fb[non_r0_mask_fb])) if np.any(non_r0_mask_fb) else 0.0
+        shifted_fb = (
+            non_r0_mask_fb
+            & (emp_drops_fb >= max(1e-4, 0.55 * max_emp_fb))
+            & (drop_proj_fb >= max(1e-6, 0.20 * max_proj_fb))
+        )
+        if not np.any(shifted_fb):
+            shifted_fb = non_r0_mask_fb & (emp_drops_fb > 1e-4) & (drop_proj_fb > 1e-9)
+        sigma_fb = 0.020
+        if np.any(shifted_fb):
+            cand_a_fb = emp_drops_fb[shifted_fb] / drop_proj_fb[shifted_fb]
+            s_d_fb = emp_drops_fb[shifted_fb][:, None]
+            s_p_fb = drop_proj_fb[shifted_fb][:, None]
+            dev_fb = np.abs(s_d_fb - s_p_fb * cand_a_fb[None, :]) / max(1e-6, y_span)
+            best_fb = int(np.argmax(np.sum((s_d_fb ** 2) * s_p_fb * np.exp(-(dev_fb ** 2) / (2.0 * (sigma_fb ** 2))), axis=0)))
+            alpha_fb = max(1e-4, float(cand_a_fb[best_fb]))
+        else:
+            alpha_fb = 1.0
+        mu_prior = alpha_fb * mu_prior
+        drop_proj_fb = (1.0 - x_arr) @ mu_prior
+        y_so_hat = y_ref - drop_proj_fb
+        lin_dev = np.abs(y_arr - y_so_hat) / max(1e-6, y_span)
+        if np.any(shifted_fb):
+            min_dev_fb = float(np.min(lin_dev[shifted_fb]))
+            lin_dev_adj_fb = np.maximum(0.0, lin_dev - min_dev_fb)
+            weights = np.where(
+                shifted_fb,
+                sem_weights * np.exp(-(lin_dev_adj_fb ** 2) / (2.0 * (sigma_fb ** 2))) + 1e-4 * float(epsilon),
+                1e-4 * float(epsilon),
+            )
+        else:
+            weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (sigma_fb ** 2))) + 1e-4 * float(epsilon)
+        weights = np.maximum(weights, 1e-4 * float(epsilon))
         if np.any(non_r0_mask_fb):
-            pert_w_sum_fb = float(np.sum(weights[non_r0_mask_fb]))
-            if pert_w_sum_fb > 1e-9:
-                weights[r0] = pert_w_sum_fb
+            pert_w_sum_fb = max(float(np.sum(weights[non_r0_mask_fb])), 1e-6)
+            weights[r0] = pert_w_sum_fb
 
         w_sum = float(np.sum(weights))
         w_norm = weights / (w_sum if w_sum > 1e-12 else 1.0)
@@ -3993,7 +4081,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
         xtwx = (xc_s * w_norm[:, None]).T @ xc_s
         xtwy = (xc_s * w_norm[:, None]).T @ yc
         diag_mean = max(1e-6, float(np.mean(np.diag(xtwx)))) if n_features > 0 else 1e-4
-        lam_surf = max(1e-5, 0.85 * diag_mean)
+        lam_surf = max(1e-5, 12.0 * diag_mean)
         gamma_prior = mu_prior / np.maximum(tau, 1e-6)
         rhs_surf = xtwy + lam_surf * gamma_prior
         try:
@@ -4001,20 +4089,18 @@ def _fit_cd_smile_prior_anchored_surrogate(
         except np.linalg.LinAlgError:
             gamma_surf = np.linalg.lstsq(xtwx + lam_surf * np.eye(n_features), rhs_surf, rcond=None)[0]
         beta_surf = tau * gamma_surf
+        if float(np.max(beta_surf)) > 1e-9:
+            beta_surf = np.maximum(0.0, beta_surf) * span_mask
+        else:
+            beta_surf = np.abs(beta_surf) * span_mask
+        pred_surf_c = xc @ beta_surf
+        denom_surf = float(np.sum(w_norm * (pred_surf_c ** 2)))
+        if denom_surf > 1e-12:
+            alpha_surf = max(0.0, float(np.sum(w_norm * yc * pred_surf_c) / denom_surf))
+            if alpha_surf > 1e-6:
+                beta_surf = alpha_surf * beta_surf
         y_pred_valid = y_bar + xc @ beta_surf
-
-    if float(np.max(beta_surf)) > 1e-9:
-        coeffs = np.maximum(0.0, beta_surf) * span_mask
-    else:
-        coeffs = np.abs(beta_surf) * span_mask
-
-    max_c = float(np.max(coeffs)) if len(coeffs) > 0 else 0.0
-    if pi_w2v is not None and len(pi_w2v) == len(coeffs) and len(coeffs) > 4 and max_c > 1e-9:
-        coeffs = np.where(
-            pi_w2v < 0.02,
-            0.001 * pi_w2v * max_c * span_mask,
-            coeffs,
-        )
+        coeffs = beta_surf.copy()
 
     if len(coeffs) != len(words):
         padded = np.zeros(len(words), dtype=float)
@@ -9625,7 +9711,7 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.2"
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.4"
 
 
 def compute_experiment_fingerprint(
@@ -9657,7 +9743,7 @@ def compute_experiment_fingerprint(
         seed: Random seed governing perturbations.
         num_perturbations: Number of perturbations configured for the run.
         importance_words: Optional list of extracted importance words.
-        schema_version: Pipeline checkpoint schema version ('4.3.2').
+        schema_version: Pipeline checkpoint schema version ('4.3.4').
 
     Returns:
         str: Hexadecimal SHA-256 experiment fingerprint.
