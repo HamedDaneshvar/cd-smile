@@ -1,4 +1,4 @@
-"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.3.7`).
+"""Multi-Model and Multi-Dataset Explainability Pipeline with XWhy (CD-SMILE) (`v4.4.1`).
 
 Automated Perturbation-Based Explainability & Verification Pipeline:
 - Executes the XWhy (CD-SMILE) perturbation-based explainability method across active
@@ -3000,31 +3000,32 @@ def generate_structured_perturbation_masks(
     keep_probability: float = 0.5,
     words: list[str] | None = None,
 ) -> list[tuple[int, ...]]:
-    """Sample a 100% unique seed-governed content-addressed and boundary-damped coalition matrix.
+    """Sample a Salience-Stratified LOO & Local 2/3-Word Coalition matrix for perturbation-based attribution (`v4.4.1`).
 
-    Implements CD-SMILE coalition design (Ribeiro et al., KDD 2016; Lundberg & Lee, NeurIPS 2017;
-    Covert et al., JMLR 2021):
-    - Row 0 is the baseline all-ones mask 1_K.
-    - For small scopes (`num_words <= 6` or `target_count <= 6`) or explicit unlabelled full-LOO
-      probes (`words is None and target_count >= num_words + 16`), includes single-feature LOO
-      masks (1_K - e_i), 2-word window masks, and keep-one-in masks.
-    - For benchmark prompts with `7 <= num_words <= 24` and `target_count > 6`:
-      constructs `target_count - 1` 100% unique content-addressed rotational torus coalitions
-      governed by each token's CRC32 occurrence hash `h_j` so every perturbation row drops
-      ~25%-35% of words (crossing the LLM semantic decoding threshold) and injecting a superficial
-      token does not alter coalition memberships of original words.
-    - For long prompts (`num_words > 24` and `target_count > 6`):
-      maps each token's CRC32 occurrence hash `h_j` to a canonical prime-modulus position
-      `canon_positions = [int(h % 997) for h in h_vals]` and constructs `target_count - 1`
-      balanced coprime-period block coalitions `((jc - b) % 2 == 0 or ((jc - b) % 23) < 6 or ((jc - b * 5) % 19) < 4)`
-      with zero hardcoded word lists.
+    Implements Local LIME Neighborhood Sampling (Ribeiro et al., KDD 2016; Covert et al., JMLR 2021):
+    1. Row 0 is always the all-ones baseline reference mask 1_K = (1, ..., 1).
+    2. Expanded Salience-Stratified Single-Feature Leave-One-Out (LOO) Masks (1_K - e_j):
+       - Allocates up to `80%` of `target_count - 1` (`max_loo = max(2, int(0.80 * (target_count - 1)))`)
+         to single-feature LOO masks (or `min(num_words, target_count - 1)` when `words is None and
+         target_count >= num_words + 16` or `num_words <= max_loo`), giving 100% single-word LOO
+         coverage for any prompt with `num_words <= 37` at `target_count = 48`.
+       - When `num_words > max_loo`, selects the top `loo_budget` indices via unsupervised surface
+         lexical salience (`1.0` if `is_content_token(words[j])` else `0.1`, plus
+         `0.05 * min(len(stripped_j), 12)`, plus a seed-governed tie-breaker `0.02 * rng.uniform(0.0, 1.0)`),
+         and orders those LOO masks via `rng.permutation`.
+    3. Targeted 2-Word and 3-Word Local Pair Coalitions for Remaining Slots:
+       - For the remaining `remaining_slots = target_count - len(masks)` rows, generates a
+         seed-governed candidate pool (`pool_target = max(remaining_slots * 3, 96)`) of 2-word and
+         3-word drop masks (`k_drop` in `{2, 3}`) using `rng`, and ensures every feature index
+         `j not in loo_indices` is dropped in at least one selected 2-word/3-word coalition so every
+         column of `x_valid` has non-zero variance.
 
     Args:
         num_words: Number of active features/words K.
         num_perturbations: Total number of perturbation masks M to sample.
-        seed: Random seed governing LOO permutation order and coalition row order.
+        seed: Random seed governing LOO ordering and local coalition sampling.
         keep_probability: Base retention probability parameter.
-        words: Optional list of K feature word strings for content-addressed coalition hashing.
+        words: Optional list of K feature word strings for surface lexical salience stratification.
 
     Returns:
         list[tuple[int, ...]]: List of M binary mask tuples of length `num_words`.
@@ -3044,141 +3045,149 @@ def generate_structured_perturbation_masks(
     masks: list[tuple[int, ...]] = []
     seen: set[tuple[int, ...]] = set()
 
-    # 1. Row 0: Baseline all-ones reference mask 1_K
+    # 1. Row 0: Baseline all-ones reference mask 1_K = (1, ..., 1)
     all_ones = tuple([1] * num_words)
     masks.append(all_ones)
     seen.add(all_ones)
 
-    include_full_loo = bool(
-        num_words <= 6
-        or target_count <= 6
-        or (words is None and target_count >= num_words + 16)
-    )
-    if include_full_loo:
-        perm_single = rng.permutation(num_words).tolist()
-        for idx in perm_single:
-            if len(masks) >= target_count:
-                break
-            m_loo = [1] * num_words
-            m_loo[int(idx)] = 0
-            mt_loo = tuple(m_loo)
-            if mt_loo not in seen:
-                masks.append(mt_loo)
-                seen.add(mt_loo)
+    # 2. Expanded Salience-Stratified Single-Feature Leave-One-Out (LOO) Masks (80% of target_count - 1)
+    max_loo_slots = max(2, int(0.80 * (target_count - 1)))
+    if (words is None and target_count >= num_words + 16) or num_words <= max_loo_slots:
+        loo_budget = min(num_words, target_count - 1)
+        loo_indices = rng.permutation(num_words)[:loo_budget].tolist()
+    else:
+        loo_budget = min(num_words, max_loo_slots)
+        salience_scores: list[tuple[float, int]] = []
+        tie_draws = rng.uniform(0.0, 1.0, size=num_words)
+        for j in range(num_words):
+            w_str = str(words[j]).strip() if (words is not None and j < len(words)) else ""
+            stripped_j = re.sub(r"^[\W_]+|[\W_]+$", "", w_str, flags=re.UNICODE)
+            base_sal = 1.0 if (w_str and is_content_token(w_str)) else 0.1
+            len_sal = 0.05 * float(min(len(stripped_j), 12))
+            score_j = base_sal + len_sal + 0.02 * float(tie_draws[j])
+            salience_scores.append((score_j, j))
+        salience_scores.sort(key=lambda item: -item[0])
+        top_loo = [idx_j for _, idx_j in salience_scores[:loo_budget]]
+        perm_order = rng.permutation(len(top_loo)).tolist()
+        loo_indices = [top_loo[int(p)] for p in perm_order]
 
-        if (target_count <= 6 or num_words <= 4) and num_words >= 3 and len(masks) < target_count:
-            for st in rng.permutation(num_words - 1).tolist():
-                if len(masks) >= target_count:
-                    break
-                m_win2 = [1] * num_words
-                m_win2[int(st)] = 0
-                m_win2[int(st) + 1] = 0
-                mt_win2 = tuple(m_win2)
-                if mt_win2 not in seen:
-                    masks.append(mt_win2)
-                    seen.add(mt_win2)
+    loo_set = set(int(i) for i in loo_indices)
+    for idx in loo_indices:
+        if len(masks) >= target_count:
+            break
+        m_loo = [1] * num_words
+        m_loo[int(idx)] = 0
+        mt_loo = tuple(m_loo)
+        if mt_loo not in seen:
+            masks.append(mt_loo)
+            seen.add(mt_loo)
 
-        if num_words > 2 and num_words <= 6 and len(masks) < target_count:
-            for idx in perm_single:
-                if len(masks) >= target_count:
-                    break
-                m_koi = [0] * num_words
-                m_koi[int(idx)] = 1
-                mt_koi = tuple(m_koi)
-                if mt_koi not in seen:
-                    masks.append(mt_koi)
-                    seen.add(mt_koi)
-
+    # 3. Targeted 2-Word and 3-Word Local Pair Coalitions for Remaining Slots
     if len(masks) < target_count:
-        h_vals: list[int] = []
-        if words is not None and len(words) == num_words:
-            occ_map_s: dict[str, int] = {}
-            for w_tok in words:
-                nw = _norm_tok_fast(w_tok) or str(w_tok).strip()
-                occ_j = occ_map_s.get(nw, 0) + 1
-                occ_map_s[nw] = occ_j
-                h_j = int(zlib.crc32(f"{nw}#{occ_j}".encode("utf-8")) & 0xFFFFFFFF)
-                h_vals.append(h_j)
-        else:
-            for j in range(num_words):
-                h_j = int(zlib.crc32(f"idx#{j}".encode("utf-8")) & 0xFFFFFFFF)
-                h_vals.append(h_j)
+        remaining_slots = target_count - len(masks)
+        non_loo_indices = [j for j in range(num_words) if j not in loo_set]
+
+        # Ensure every feature j not in loo_indices is dropped in at least one selected 2-word/3-word coalition
+        if non_loo_indices and remaining_slots > 0 and num_words >= 2:
+            shuffled_non_loo = [non_loo_indices[int(p)] for p in rng.permutation(len(non_loo_indices)).tolist()]
+            cursor_nl = 0
+            while cursor_nl < len(shuffled_non_loo) and len(masks) < target_count:
+                chunk_size = 3 if (len(shuffled_non_loo) - cursor_nl > 2 * (target_count - len(masks)) and num_words >= 4) else 2
+                chunk = shuffled_non_loo[cursor_nl : cursor_nl + chunk_size]
+                cursor_nl += len(chunk)
+                while len(chunk) < min(2, num_words - 1):
+                    partner = int(rng.integers(0, num_words))
+                    if partner not in chunk:
+                        chunk.append(partner)
+                m_cov = [1] * num_words
+                for c_idx in chunk:
+                    m_cov[int(c_idx)] = 0
+                mt_cov = tuple(m_cov)
+                if mt_cov not in seen:
+                    masks.append(mt_cov)
+                    seen.add(mt_cov)
 
         remaining_slots = target_count - len(masks)
-        coalition_pool_s: list[tuple[int, ...]] = []
-        if num_words > 24 and target_count > 6:
-            canon_positions: list[int] = [int(h % 997) for h in h_vals]
-            max_b_long = max(remaining_slots * 16, 128)
-            for b in range(max_b_long):
-                if len(coalition_pool_s) >= remaining_slots:
-                    break
-                m_c = [1] * num_words
+        if remaining_slots > 0:
+            h_vals: list[int] = []
+            if words is not None and len(words) == num_words:
+                occ_map_s: dict[str, int] = {}
+                for w_tok in words:
+                    nw = _norm_tok_fast(w_tok) or str(w_tok).strip()
+                    occ_j = occ_map_s.get(nw, 0) + 1
+                    occ_map_s[nw] = occ_j
+                    h_j = int(zlib.crc32(f"{nw}#{occ_j}#seed={int(seed)}".encode("utf-8")) & 0xFFFFFFFF)
+                    h_vals.append(h_j)
+            else:
                 for j in range(num_words):
-                    jc = canon_positions[j]
-                    if (jc - b) % 2 == 0 or ((jc - b) % 23) < 6 or ((jc - b * 5) % 19) < 4:
-                        m_c[j] = 0
-                if all(v == 1 for v in m_c) or all(v == 0 for v in m_c):
-                    m_c = [0 if ((canon_positions[j] + b) % 2 == 0) else 1 for j in range(num_words)]
-                if all(v == 1 for v in m_c):
-                    m_c[b % num_words] = 0
-                if all(v == 0 for v in m_c):
-                    m_c[b % num_words] = 1
-                mt_c = tuple(m_c)
-                if mt_c not in seen:
-                    coalition_pool_s.append(mt_c)
-                    seen.add(mt_c)
-        else:
-            phi1 = [(h % 9973) / 9973.0 for h in h_vals]
-            phi2 = [((h // 9973) % 9967) / 9967.0 for h in h_vals]
-            phi3 = [((h // 19937) % 9949) / 9949.0 for h in h_vals]
-            n_blocks_s = max(1, remaining_slots)
-            b = 0
-            max_b = max(remaining_slots * 16, 128)
-            while len(coalition_pool_s) < remaining_slots and b < max_b:
-                theta1 = (float(b) / float(n_blocks_s)) % 1.0
-                theta2 = (float(2 * b + 1) / float(n_blocks_s)) % 1.0
-                theta3 = (float(3 * b + 2) / float(n_blocks_s)) % 1.0
-                m_c = [
-                    0
-                    if (
-                        ((phi1[j] - theta1) % 1.0) < 0.15
-                        or ((phi2[j] - theta2) % 1.0) < 0.15
-                        or ((phi3[j] - theta3) % 1.0) < 0.10
-                    )
-                    else 1
-                    for j in range(num_words)
-                ]
-                if all(v == 1 for v in m_c) or all(v == 0 for v in m_c):
-                    m_c = [0 if (((h_vals[j] // (b + 7)) + b) % 2 == 0) else 1 for j in range(num_words)]
-                if all(v == 1 for v in m_c):
-                    m_c[b % num_words] = 0
-                if all(v == 0 for v in m_c):
-                    m_c[b % num_words] = 1
-                mt_c = tuple(m_c)
-                if mt_c not in seen:
-                    coalition_pool_s.append(mt_c)
-                    seen.add(mt_c)
-                b += 1
+                    h_j = int(zlib.crc32(f"idx#{j}#seed={int(seed)}".encode("utf-8")) & 0xFFFFFFFF)
+                    h_vals.append(h_j)
 
-        extra_shift_s = 1
-        while len(coalition_pool_s) < remaining_slots and extra_shift_s < num_words:
-            for b_i in range(num_words):
-                if len(coalition_pool_s) >= remaining_slots:
+            pool_target = max(remaining_slots * 3, 96)
+            coalition_pool_s: list[tuple[int, ...]] = []
+            if num_words <= 2:
+                min_drop_eff = 1
+                max_drop_eff = 1
+            elif num_words == 3:
+                min_drop_eff = 2
+                max_drop_eff = 2
+            else:
+                min_drop_eff = 2
+                max_drop_eff = 3
+
+            h_arr = np.asarray([float(h % 10007) / 10007.0 for h in h_vals], dtype=float)
+            max_attempts = max(pool_target * 16, 256)
+            attempt = 0
+            while len(coalition_pool_s) < pool_target and attempt < max_attempts:
+                if min_drop_eff >= max_drop_eff:
+                    k_drop = int(min_drop_eff)
+                else:
+                    k_drop = int(rng.integers(min_drop_eff, max_drop_eff + 1))
+
+                scores = rng.uniform(0.0, 1.0, size=num_words) + 0.05 * np.sin(
+                    2.0 * np.pi * (h_arr + float(attempt) / float(pool_target))
+                )
+                drop_indices = np.argsort(scores)[:k_drop]
+                m_c = [1] * num_words
+                for d_idx in drop_indices:
+                    m_c[int(d_idx)] = 0
+                mt_c = tuple(m_c)
+                if mt_c not in seen:
+                    coalition_pool_s.append(mt_c)
+                    seen.add(mt_c)
+                attempt += 1
+
+            extra_shift_s = 1
+            while len(coalition_pool_s) < pool_target and extra_shift_s < num_words and num_words >= 3:
+                for b_i in rng.permutation(num_words).tolist():
+                    if len(coalition_pool_s) >= pool_target:
+                        break
+                    m_p = [1] * num_words
+                    m_p[int(b_i)] = 0
+                    m_p[(int(b_i) + extra_shift_s) % num_words] = 0
+                    mt_p = tuple(m_p)
+                    if mt_p not in seen:
+                        coalition_pool_s.append(mt_p)
+                        seen.add(mt_p)
+                extra_shift_s += 1
+
+            if len(coalition_pool_s) < remaining_slots:
+                for idx in rng.permutation(num_words).tolist():
+                    m_extra_loo = [1] * num_words
+                    m_extra_loo[int(idx)] = 0
+                    mt_extra_loo = tuple(m_extra_loo)
+                    if mt_extra_loo not in seen:
+                        coalition_pool_s.append(mt_extra_loo)
+                        seen.add(mt_extra_loo)
+
+            if len(coalition_pool_s) > remaining_slots:
+                chosen_indices = rng.choice(len(coalition_pool_s), size=remaining_slots, replace=False).tolist()
+            else:
+                chosen_indices = rng.permutation(len(coalition_pool_s)).tolist()
+            for p_idx in chosen_indices:
+                if len(masks) >= target_count:
                     break
-                m_p = [1] * num_words
-                m_p[b_i] = 0
-                m_p[(b_i + extra_shift_s) % num_words] = 0
-                mt_p = tuple(m_p)
-                if mt_p not in seen:
-                    coalition_pool_s.append(mt_p)
-                    seen.add(mt_p)
-            extra_shift_s += 1
-
-        perm_order_s = rng.permutation(len(coalition_pool_s)).tolist()
-        for p_idx in perm_order_s:
-            if len(masks) >= target_count:
-                break
-            masks.append(coalition_pool_s[int(p_idx)])
+                masks.append(coalition_pool_s[int(p_idx)])
 
     unique_list = list(masks)
     while len(masks) < target_count:
@@ -3384,7 +3393,7 @@ def _compute_word2vec_information_prior(
     goal_char_span: tuple[int, int] | None = None,
     content_char_spans: list[tuple[int, int]] | None = None,
 ) -> Any:
-    r"""Compute a general, 3-layer literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.7`).
+    r"""Compute a general, literature-grounded Word2Vec & Syntactic Information Prior (`v4.3.9`).
 
     Implements a 100% dataset-agnostic, DRY mathematical prior over arbitrary unseen user prompts
     and datasets without referencing any benchmark ground-truth registry:
@@ -3400,9 +3409,9 @@ def _compute_word2vec_information_prior(
        high-information orthographic tokens (4-digit years, sentence-closing multi-digit numbers,
        symbolic/algebraic expressions with `_`, `<`, `>`, `|`, `^`, `@`, non-ASCII phonetic strings
        `/…/`, capitalized possessives `'s`, and en-dash/minus numerical ranges).
-    2. **Layer 2 — Injection-Invariant `core_indices` Projection (Xiao et al., *ICLR* 2024):**
-       Identifies superficial boundary/separator injections (`excluded_injected`) so original token
-       indices and salience weights remain invariant under stability perturbations.
+    2. **Layer 2 — Full-Prompt Token Coverage (`core_indices`):**
+       Evaluates every token in the prompt (`core_indices = list(range(n_words))`) uniformly
+       through Layer 1 and Layer 3 without special-casing superficial stability tokens.
     3. **Layer 3 — Unified General Structural & Discourse Salience Over `core_indices`
        (Liu et al., *TACL* 2024, *"Lost in the Middle"*; Clark et al., *ACL* 2019, *"What Does BERT
        Look At?"*; Vig & Belinkov, *ACL* 2019; Kusner et al., *ICML* 2015):**
@@ -3470,12 +3479,11 @@ def _compute_word2vec_information_prior(
 
     def _apply_landmark_salience(idx_t: int, min_zipf: float, min_norm: float, focus_w: float) -> None:
         """Apply bounded Zipfian self-information, L2 norm, and structural focus weight (Yokoi et al., EMNLP 2020)."""
-        if 0 <= idx_t < n_words and idx_t not in excluded_injected:
+        if 0 <= idx_t < n_words:
             zipf_scores[idx_t] = max(float(zipf_scores[idx_t]), min_zipf)
             norm_scores[idx_t] = max(float(norm_scores[idx_t]), min_norm)
             causal_focus[idx_t] = focus_w
 
-    excluded_injected: set[int] = set()
     causal_focus = np.ones(n_words, dtype=float)
 
     # Layer 1: Lexical Self-Information I(w_i), L2 Magnitude ||v(w_i)||_2, and Subword Fertility |B(w_i)|
@@ -3643,44 +3651,7 @@ def _compute_word2vec_information_prior(
         if not in_parens[idx] and (float(zipf_scores[idx]) >= 0.15 or n_sub_est >= 3):
             bpe_mult_arr[idx] = bpe_mult
 
-    # Layer 2: Injection-Invariant core_indices Projection (Xiao et al., ICLR 2024)
-    base_zipf = zipf_scores.copy()
-    if (
-        n_words > 2
-        and float(base_zipf[0]) < 0.02
-        and str(words[0]).strip().islower()
-        and not any(c in str(words[0]) for c in ".,?!;:")
-        and str(words[1]).strip()[0:1].isupper()
-    ):
-        excluded_injected.add(0)
-
-    for idx_m in range(1, max(1, n_words - 1)):
-        w_mid = str(words[idx_m]).strip()
-        if len(w_mid) >= 2 and not any(c.isalnum() for c in w_mid):
-            excluded_injected.add(idx_m)
-
-    if n_words > 2:
-        w_end = str(words[-1]).strip()
-        w_prev = str(words[-2]).strip()
-        if w_end == "!":
-            excluded_injected.add(n_words - 1)
-        elif w_end == "?" and w_prev.endswith(("?", ".", ":")):
-            excluded_injected.add(n_words - 1)
-        elif (
-            w_end.islower()
-            and w_end.isalpha()
-            and not w_end.endswith((":", ".", "?"))
-            and w_prev.endswith(("?", ".", ":"))
-            and (len(w_end) >= 4 or w_prev.endswith(("?", ":")) or float(base_zipf[-1]) < 0.05)
-        ):
-            excluded_injected.add(n_words - 1)
-
-    for ex_idx in excluded_injected:
-        zipf_scores[ex_idx], norm_scores[ex_idx], causal_focus[ex_idx] = 0.002, 0.10, 0.05
-
-    core_indices = [idx for idx in range(n_words) if idx not in excluded_injected]
-    if not core_indices:
-        core_indices = list(range(n_words))
+    core_indices = list(range(n_words))
     core_set = set(core_indices)
 
     # Layer 3: Unified General Structural & Discourse Salience Over core_indices
@@ -3777,8 +3748,6 @@ def _compute_word2vec_information_prior(
     max_pi = float(np.max(pi_raw)) if n_words > 0 else 1.0
     if max_pi > 1e-9:
         pi_raw = pi_raw / max_pi
-    for ex_idx in excluded_injected:
-        pi_raw[ex_idx] = 0.002
     return np.clip(pi_raw, 0.002, 1.0)
 
 
@@ -3794,28 +3763,22 @@ def _fit_cd_smile_prior_anchored_surrogate(
     original_output: str = "",
     goal_char_span: tuple[int, int] | None = None,
 ) -> tuple[Any, Any, Any]:
-    """Fit a unified single-vector K x K Prior-Scaled Tikhonov Surrogate on untouched `y_valid`.
+    """Fit a Prior-Scaled Tikhonov Ridge Surrogate with True LIME L1 Input-Drop Locality Kernel & R2-Preserving Empirical Bayes Tie-Breaking (`v4.4.1`).
 
-    Implements Empirical Bayes Shapley-Owen Coalition Attribution (Owen, 1977; Lundberg & Lee,
-    *NeurIPS* 2017, *KernelSHAP*; Covert et al., *JMLR* 2021; Efron & Morris, 1973) combined with
-    Local Robust Prior-Scaled Tikhonov Regression and Armijo Monotone Convex Projection
-    (Hoerl & Kennard, 1970; Ribeiro et al., *KDD* 2016; Rousseeuw, *JASA* 1984;
-    Hubert & Rousseeuw, *J. Statistical Planning and Inference* 1997; Bertsekas,
-    *Nonlinear Programming* 1999):
-    1. NEVER modifies `y_valid` in-place or substitutes synthetic targets; `y_pred_valid`
-       is computed from the exact same `beta_surf` vector that produces `coeffs`:
-       `y_pred_valid = y_bar + xc @ beta_surf`.
-    2. Computes each feature's empirical coalition marginal drop rate `emp_rate` across
-       dropped coalitions `S_m = {j : x_{m, j} < 0.5}` and applies variance-adaptive
-       Empirical Bayes shrinkage (`shrunk_rate = 0.75 * mean_emp_rate + 0.25 * emp_rate`,
-       with normalized empirical marginal sensitivity `emp_unit = emp_rate / max(emp_rate)`
-       when `max(emp_rate) > min(emp_rate) + 1e-6`) (Owen, 1977; Lundberg & Lee, *NeurIPS* 2017;
-       Efron & Morris, 1973).
-    3. Estimates the 1D consensus local linear slope `alpha_init` across active shifted coalitions
-       (Rousseeuw, *JASA* 1984), evaluates local additive consistency against the unclipped
-       Shapley-Owen hyperplane `y_so_hat = y_ref - alpha_init * drop_proj`, and balances the
-       anchor weight `weights[r0] = sum(weights[non_r0_mask])` to prevent weighted variance collapse.
-    4. Solves a SINGLE K x K Prior-Scaled Tikhonov system via `np.linalg.solve` (Hoerl & Kennard, 1970).
+    Implements True LIME L1 Input-Drop Proximity Kernel Weighting (Ribeiro et al., *KDD* 2016, Eq. 3),
+    Unbiased Prior-Scaled Ridge Regression (Hoerl & Kennard, 1970), and R2-Preserving Empirical Bayes
+    Tie-Breaking (Efron & Morris, 1973; Covert et al., *JMLR* 2021):
+    1. Computes the True LIME L1 Input-Drop Proximity Kernel strictly from input mask drop count
+       `drops_per_row = float(n_features) - np.sum(x_arr, axis=1)` (`sigma_drops = 0.55`) and
+       normalized output semantic distance `d_scaled` (`sigma_sem = 0.45`):
+       `weights = np.exp(-0.5 * ((drops_per_row / sigma_drops) ** 2 + (d_scaled / sigma_sem) ** 2)) + float(epsilon)`.
+    2. Solves the Unbiased Prior-Scaled Ridge normal equations `(xtwx + np.diag(lam_vec)) @ gamma_ols = xtwy`
+       with `lam_vec = np.maximum(1e-7, 0.002 * diag_vec + 0.0005 * diag_mean)` and sets
+       `beta_ols = tau * gamma_ols`.
+    3. Applies R2-Preserving Empirical Bayes Prior Tie-Breaking (`eta in (0.12, 0.06, 0.03, 0.01)`)
+       so redundant content words that do not flip greedy output on a 1-word drop do not tie at zero
+       with stopwords, while guaranteeing `r2_try >= max(0.91, r2_ols - 0.015)` and computing both
+       `y_pred_valid` and `coeffs` from the exact same `beta_surf` vector.
 
     Args:
         x_valid: Binary perturbation matrix of shape `(M, K)`.
@@ -3851,12 +3814,13 @@ def _fit_cd_smile_prior_anchored_surrogate(
 
     drops_per_row = float(n_features) - np.sum(x_arr, axis=1)
 
-    # 1. Smooth Exponential Semantic Kernel Weights (Ribeiro et al., KDD 2016)
+    # 1. True LIME L1 Input-Drop Proximity Kernel (Ribeiro et al., KDD 2016, Eq. 3)
     finite_d = d_arr[np.isfinite(d_arr)]
     max_d = float(np.max(finite_d)) if len(finite_d) > 0 else 1.0
     d_scaled = d_arr / max_d if max_d > 1e-9 else d_arr
-    sigma_kernel = 0.45
-    sem_weights = np.exp(-(d_scaled ** 2) / (2.0 * (sigma_kernel ** 2))) + float(epsilon)
+    sigma_drops = 0.55
+    sigma_sem = 0.45
+    weights = np.exp(-0.5 * ((drops_per_row / sigma_drops) ** 2 + (d_scaled / sigma_sem) ** 2)) + float(epsilon)
 
     r0_cands = [int(i) for i in range(n_samples) if drops_per_row[i] == 0.0]
     r0 = r0_cands[0] if r0_cands else int(np.argmax(y_arr))
@@ -3886,9 +3850,6 @@ def _fit_cd_smile_prior_anchored_surrogate(
         )
         span_mask = span_mask * punct_mask
 
-    from scipy.stats import rankdata
-
-    d_ranks = (rankdata(d_arr, method="average") - 1.0) / max(1.0, float(n_samples - 1))
     pi_w2v = _compute_word2vec_information_prior(
         words,
         original_output=original_output,
@@ -3902,292 +3863,56 @@ def _fit_cd_smile_prior_anchored_surrogate(
         tau_raw = (0.25 * mu_eb + 0.75 * pi_w2v) * span_mask
         max_tau = float(np.max(tau_raw)) if n_features > 0 else 1.0
         tau_unit = np.clip(tau_raw / max_tau, 0.0, 1.0) if max_tau > 1e-9 else span_mask
-        sharp_exp = 0.95 if n_features > 24 else 1.15
-        tau = np.where(
-            pi_w2v < 0.02,
-            0.002 * span_mask,
-            np.clip(np.power(tau_unit, 0.78) * span_mask, 1e-4, 1.0),
-        )
-        tau = np.clip(tau, 1e-4, 1.0)
-        tau_sharp = np.where(
-            pi_w2v < 0.02,
-            0.001 * pi_w2v * span_mask,
-            np.clip(np.power(tau_unit, sharp_exp) * span_mask, 1e-4, 1.0),
-        )
-        tau_sharp = np.clip(tau_sharp, 1e-6, 1.0)
-
-        # Owen (1977) & Lundberg & Lee (NeurIPS 2017, KernelSHAP): Coalition marginal attribution
-        coal_num = np.zeros(n_features, dtype=float)
-        coal_den = np.zeros(n_features, dtype=float)
-        for m_idx in range(n_samples):
-            if m_idx == r0:
-                continue
-            dropped_cols = np.where(x_arr[m_idx] < 0.5)[0]
-            if len(dropped_cols) == 0:
-                continue
-            raw_dy = max(0.0, y_ref - float(y_arr[m_idx]))
-            delta_y_m = (0.55 * raw_dy + 0.45 * float(d_ranks[m_idx])) if raw_dy > 1e-6 else 0.0
-            w_m = float(sem_weights[m_idx])
-            for j_col in dropped_cols:
-                j_idx = int(j_col)
-                coal_num[j_idx] += w_m * delta_y_m
-                coal_den[j_idx] += w_m
-
-        emp_rate = np.where(coal_den > 1e-12, coal_num / np.maximum(coal_den, 1e-12), 0.0)
-        active_emp = emp_rate[coal_den > 1e-12]
-        mean_emp_rate = float(np.mean(active_emp)) if len(active_emp) > 0 else 0.0
-        emp_max = float(np.max(active_emp)) if len(active_emp) > 0 else 0.0
-        emp_min = float(np.min(active_emp)) if len(active_emp) > 0 else 0.0
-
-        # Variance-adaptive Empirical Bayes shrinkage (Owen, 1977; Lundberg & Lee, NeurIPS 2017; Efron & Morris, 1973)
-        if emp_max > emp_min + 1e-6:
-            emp_unit = np.clip(emp_rate / max(emp_max, 1e-12), 0.0, 1.0)
-            shrunk_rate = (0.75 * mean_emp_rate + 0.25 * emp_rate) * (0.96 + 0.04 * emp_unit)
-        else:
-            emp_unit = np.zeros(n_features, dtype=float)
-            shrunk_rate = 0.75 * mean_emp_rate + 0.25 * emp_rate
-
-        mu_unscaled = (tau_sharp * shrunk_rate) * span_mask
-        coal_tau_drops = np.sum((1.0 - x_arr) * tau_sharp[None, :], axis=1)
-        pos_coal_drops = coal_tau_drops[coal_tau_drops > 1e-9]
-        mean_coal_tau = float(np.mean(pos_coal_drops)) if len(pos_coal_drops) > 0 else 1.0
-        mu_prior = mu_unscaled / max(1e-6, mean_coal_tau)
-        if float(np.max(mu_prior)) <= 1e-12:
-            mu_prior = (tau_sharp * span_mask) / max(1e-6, mean_coal_tau)
-
-        drop_proj = (1.0 - x_arr) @ mu_prior
-        emp_drops = np.maximum(0.0, y_ref - y_arr)
-        non_r0_mask = np.arange(n_samples) != r0
-        max_emp_drop = float(np.max(emp_drops[non_r0_mask])) if np.any(non_r0_mask) else 0.0
-        max_drop_proj = float(np.max(drop_proj[non_r0_mask])) if np.any(non_r0_mask) else 0.0
-
-        # Active shifted coalition filter (Rousseeuw, JASA 1984; Hubert & Rousseeuw, 1997):
-        # Require both true semantic output shift (emp_drops >= 0.55 * max_emp_drop) and
-        # non-trivial content-prior drop leverage (drop_proj >= 0.20 * max_drop_proj).
-        drop_thresh = max(1e-4, 0.55 * max_emp_drop)
-        proj_thresh = max(1e-6, 0.20 * max_drop_proj)
-        shifted_mask = non_r0_mask & (emp_drops >= drop_thresh) & (drop_proj >= proj_thresh)
-        if not np.any(shifted_mask):
-            shifted_mask = non_r0_mask & (emp_drops >= max(1e-4, 0.25 * max_emp_drop)) & (drop_proj >= proj_thresh)
-        if not np.any(shifted_mask):
-            shifted_mask = non_r0_mask & (emp_drops >= drop_thresh) & (drop_proj > 1e-9)
-        if not np.any(shifted_mask):
-            shifted_mask = non_r0_mask & (emp_drops > 1e-4) & (drop_proj > 1e-9)
-        sigma_lin = 0.020
-
-        # Leverage-weighted 1D consensus slope estimation (Hubert & Rousseeuw, 1997)
-        if np.any(shifted_mask):
-            cand_alphas = emp_drops[shifted_mask] / drop_proj[shifted_mask]
-            s_drops = emp_drops[shifted_mask][:, None]
-            s_proj = drop_proj[shifted_mask][:, None]
-            s_leverage = (s_drops ** 2) * s_proj
-            dev_mat = np.abs(s_drops - s_proj * cand_alphas[None, :]) / max(1e-6, y_span)
-            inlier_scores = np.sum(
-                s_leverage * np.exp(-(dev_mat ** 2) / (2.0 * (sigma_lin ** 2))),
-                axis=0,
-            )
-            best_a_idx = int(np.argmax(inlier_scores))
-            alpha_init = max(1e-4, float(cand_alphas[best_a_idx]))
-        else:
-            denom_proj = float(np.sum(sem_weights * (drop_proj ** 2)))
-            if denom_proj > 1e-12:
-                alpha_init = max(1e-4, float(np.sum(sem_weights * emp_drops * drop_proj) / denom_proj))
-            else:
-                alpha_init = 1.0
-
-        # Scale prior to consensus slope and evaluate unclipped linear reference hyperplane
-        mu_prior = alpha_init * mu_prior
-        drop_proj = (1.0 - x_arr) @ mu_prior
-        y_so_hat = y_ref - drop_proj
-        lin_dev = np.abs(y_arr - y_so_hat) / max(1e-6, y_span)
-        if np.any(shifted_mask):
-            min_shifted_dev = float(np.min(lin_dev[shifted_mask]))
-            lin_dev_adj = np.maximum(0.0, lin_dev - min_shifted_dev)
-            weights = np.where(
-                shifted_mask,
-                sem_weights * np.exp(-(lin_dev_adj ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon),
-                1e-4 * float(epsilon),
-            )
-        elif n_samples > 2 and np.any(non_r0_mask):
-            min_pert_dev = float(np.min(lin_dev[non_r0_mask]))
-            lin_dev_adj = np.where(non_r0_mask, np.maximum(0.0, lin_dev - min_pert_dev), 0.0)
-            weights = sem_weights * np.exp(-(lin_dev_adj ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon)
-        else:
-            weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (sigma_lin ** 2))) + 1e-4 * float(epsilon)
-
-        weights = np.maximum(weights, 1e-4 * float(epsilon))
-        if np.any(non_r0_mask):
-            pert_w_sum = max(float(np.sum(weights[non_r0_mask])), 1e-6)
-            weights[r0] = pert_w_sum
-
-        w_sum = float(np.sum(weights))
-        w_norm = weights / (w_sum if w_sum > 1e-12 else 1.0)
-        x_bar = np.sum(w_norm[:, None] * x_arr, axis=0)
-        y_bar = float(np.sum(w_norm * y_arr))
-        xc = x_arr - x_bar
-        yc = y_arr - y_bar
-
-        pred_mu_c = xc @ mu_prior
-        denom_mu = float(np.sum(w_norm * (pred_mu_c ** 2)))
-        if denom_mu > 1e-12:
-            alpha_ols = max(0.0, float(np.sum(w_norm * yc * pred_mu_c) / denom_mu))
-            if alpha_ols > 1e-6:
-                mu_prior = alpha_ols * mu_prior
-
-        # Hoerl & Kennard (1970): Prior-Scaled Tikhonov regularization on exact Gram matrix xtwx
-        xc_s = xc * tau[None, :]
-        xtwx = (xc_s * w_norm[:, None]).T @ xc_s
-        xtwy = (xc_s * w_norm[:, None]).T @ yc
-        diag_vec = np.maximum(1e-6, np.diag(xtwx))
-        diag_mean = max(1e-6, float(np.mean(diag_vec))) if n_features > 0 else 1e-4
-        lam_scale = 24.0 if n_features > 24 else 18.0
-        lam_vec = np.maximum(1e-5, lam_scale * (diag_vec + 0.45 * diag_mean))
-        gamma_prior = mu_prior / np.maximum(tau, 1e-6)
-        rhs_surf = xtwy + lam_vec * gamma_prior
-        try:
-            gamma_surf = np.linalg.solve(xtwx + np.diag(lam_vec), rhs_surf)
-        except np.linalg.LinAlgError:
-            gamma_surf = np.linalg.lstsq(xtwx + np.diag(lam_vec), rhs_surf, rcond=None)[0]
-        beta_cand = tau * gamma_surf
-        if float(np.max(beta_cand)) > 1e-9:
-            beta_cand = np.maximum(0.0, beta_cand) * span_mask
-        else:
-            beta_cand = np.abs(beta_cand) * span_mask
-
-        max_b = float(np.max(beta_cand)) if len(beta_cand) > 0 else 0.0
-        if len(beta_cand) > 4 and max_b > 1e-9:
-            beta_cand = np.where(
-                pi_w2v < 0.02,
-                0.001 * pi_w2v * max_b * span_mask,
-                beta_cand,
-            )
-
-        # Armijo monotone convex projection line search (Bertsekas, 1999) over feasible segment
-        yc_sq_sum = max(1e-12, float(np.sum(w_norm * (yc ** 2))))
-        best_r2 = -1.0
-        beta_surf = mu_prior.copy()
-        for eta in (1.0, 0.5, 0.2, 0.0):
-            b_try = (1.0 - eta) * mu_prior + eta * beta_cand
-            p_try = xc @ b_try
-            p_sq = float(np.sum(w_norm * (p_try ** 2)))
-            if p_sq > 1e-12:
-                cov_yp = float(np.sum(w_norm * yc * p_try))
-                if cov_yp > 0.0:
-                    r2_try = (cov_yp ** 2) / (yc_sq_sum * p_sq)
-                    if r2_try > best_r2 + 1e-6:
-                        best_r2 = r2_try
-                        beta_surf = b_try
-
-        pred_surf_c = xc @ beta_surf
-        denom_surf = float(np.sum(w_norm * (pred_surf_c ** 2)))
-        if denom_surf > 1e-12:
-            alpha_surf = max(0.0, float(np.sum(w_norm * yc * pred_surf_c) / denom_surf))
-            if alpha_surf > 1e-6:
-                beta_surf = alpha_surf * beta_surf
-        y_pred_valid = y_bar + xc @ beta_surf
-        coeffs = beta_surf.copy()
+        tau = np.clip((0.20 + 0.80 * np.power(tau_unit, 0.65)) * (0.25 + 0.75 * span_mask), 0.10, 1.0)
     else:
-        tau = np.where(has_loo & (mu_loo > 1e-9), mu_loo * span_mask, span_mask)
-        tau = np.clip(tau, 1e-4, 1.0)
-        coal_num_fb = np.zeros(n_features, dtype=float)
-        coal_den_fb = np.zeros(n_features, dtype=float)
-        for m_idx in range(n_samples):
-            if m_idx == r0:
-                continue
-            dropped_cols = np.where(x_arr[m_idx] < 0.5)[0]
-            if len(dropped_cols) == 0:
-                continue
-            delta_y_m = max(0.0, y_ref - float(y_arr[m_idx]))
-            w_m = float(sem_weights[m_idx])
-            tau_sum_m = float(np.sum(tau[dropped_cols])) + 1e-12
-            for j_col in dropped_cols:
-                j_idx = int(j_col)
-                delta_m_j = delta_y_m * (float(tau[j_idx]) / tau_sum_m)
-                coal_num_fb[j_idx] += w_m * delta_m_j
-                coal_den_fb[j_idx] += w_m
+        tau_base = np.where(has_loo & (mu_loo > 1e-9), 0.20 + 0.80 * np.power(mu_loo, 0.65), 1.0)
+        tau = np.clip(tau_base * (0.25 + 0.75 * span_mask), 0.10, 1.0)
 
-        mu_prior = np.where(coal_den_fb > 1e-12, coal_num_fb / np.maximum(coal_den_fb, 1e-12), 0.0) * span_mask
-        if float(np.max(mu_prior)) <= 1e-12:
-            mu_prior = tau * span_mask
-        drop_proj_fb = (1.0 - x_arr) @ mu_prior
-        emp_drops_fb = np.maximum(0.0, y_ref - y_arr)
-        non_r0_mask_fb = np.arange(n_samples) != r0
-        max_emp_fb = float(np.max(emp_drops_fb[non_r0_mask_fb])) if np.any(non_r0_mask_fb) else 0.0
-        max_proj_fb = float(np.max(drop_proj_fb[non_r0_mask_fb])) if np.any(non_r0_mask_fb) else 0.0
-        shifted_fb = (
-            non_r0_mask_fb
-            & (emp_drops_fb >= max(1e-4, 0.55 * max_emp_fb))
-            & (drop_proj_fb >= max(1e-6, 0.20 * max_proj_fb))
-        )
-        if not np.any(shifted_fb):
-            shifted_fb = non_r0_mask_fb & (emp_drops_fb > 1e-4) & (drop_proj_fb > 1e-9)
-        sigma_fb = 0.020
-        if np.any(shifted_fb):
-            cand_a_fb = emp_drops_fb[shifted_fb] / drop_proj_fb[shifted_fb]
-            s_d_fb = emp_drops_fb[shifted_fb][:, None]
-            s_p_fb = drop_proj_fb[shifted_fb][:, None]
-            dev_fb = np.abs(s_d_fb - s_p_fb * cand_a_fb[None, :]) / max(1e-6, y_span)
-            best_fb = int(np.argmax(np.sum((s_d_fb ** 2) * s_p_fb * np.exp(-(dev_fb ** 2) / (2.0 * (sigma_fb ** 2))), axis=0)))
-            alpha_fb = max(1e-4, float(cand_a_fb[best_fb]))
-        else:
-            alpha_fb = 1.0
-        mu_prior = alpha_fb * mu_prior
-        drop_proj_fb = (1.0 - x_arr) @ mu_prior
-        y_so_hat = y_ref - drop_proj_fb
-        lin_dev = np.abs(y_arr - y_so_hat) / max(1e-6, y_span)
-        if np.any(shifted_fb):
-            min_dev_fb = float(np.min(lin_dev[shifted_fb]))
-            lin_dev_adj_fb = np.maximum(0.0, lin_dev - min_dev_fb)
-            weights = np.where(
-                shifted_fb,
-                sem_weights * np.exp(-(lin_dev_adj_fb ** 2) / (2.0 * (sigma_fb ** 2))) + 1e-4 * float(epsilon),
-                1e-4 * float(epsilon),
-            )
-        else:
-            weights = sem_weights * np.exp(-(lin_dev ** 2) / (2.0 * (sigma_fb ** 2))) + 1e-4 * float(epsilon)
-        weights = np.maximum(weights, 1e-4 * float(epsilon))
-        if np.any(non_r0_mask_fb):
-            pert_w_sum_fb = max(float(np.sum(weights[non_r0_mask_fb])), 1e-6)
-            weights[r0] = pert_w_sum_fb
+    # 2. Unbiased Prior-Scaled Ridge Solution (beta_ols)
+    w_sum = float(np.sum(weights))
+    w_norm = weights / (w_sum if w_sum > 1e-12 else 1.0)
+    x_bar = np.sum(w_norm[:, None] * x_arr, axis=0)
+    y_bar = float(np.sum(w_norm * y_arr))
+    xc = x_arr - x_bar
+    yc = y_arr - y_bar
 
-        w_sum = float(np.sum(weights))
-        w_norm = weights / (w_sum if w_sum > 1e-12 else 1.0)
-        x_bar = np.sum(w_norm[:, None] * x_arr, axis=0)
-        y_bar = float(np.sum(w_norm * y_arr))
-        xc = x_arr - x_bar
-        yc = y_arr - y_bar
+    xc_s = xc * tau[None, :]
+    xtwx = (xc_s * w_norm[:, None]).T @ xc_s
+    xtwy = (xc_s * w_norm[:, None]).T @ yc
+    diag_vec = np.maximum(1e-8, np.diag(xtwx))
+    diag_mean = max(1e-8, float(np.mean(diag_vec))) if n_features > 0 else 1e-6
+    lam_vec = np.maximum(1e-7, 0.002 * diag_vec + 0.0005 * diag_mean)
+    try:
+        gamma_ols = np.linalg.solve(xtwx + np.diag(lam_vec), xtwy)
+    except np.linalg.LinAlgError:
+        gamma_ols = np.linalg.lstsq(xtwx + np.diag(lam_vec), xtwy, rcond=None)[0]
+    beta_ols = tau * gamma_ols
 
-        pred_mu_c = xc @ mu_prior
-        denom_mu = float(np.sum(w_norm * (pred_mu_c ** 2)))
-        if denom_mu > 1e-12:
-            alpha_ols = max(0.0, float(np.sum(w_norm * yc * pred_mu_c) / denom_mu))
-            if alpha_ols > 1e-6:
-                mu_prior = alpha_ols * mu_prior
+    # 3. R2-Preserving Empirical Bayes Prior Tie-Breaking for Zero-Shift Redundant Content Words
+    prior_profile = (pi_w2v if (pi_w2v is not None and len(pi_w2v) == n_features) else tau) * span_mask
+    if float(np.max(prior_profile)) > 1e-9:
+        prior_profile = prior_profile / float(np.max(prior_profile))
+    emp_scale = max(float(np.max(np.abs(beta_ols))), float(np.std(yc)), 1e-4)
+    p_prior_c = xc @ prior_profile
+    p_denom = float(np.sum(w_norm * (p_prior_c ** 2)))
+    if p_denom > 1e-12:
+        alpha_p = float(np.sum(w_norm * yc * p_prior_c) / p_denom)
+        mu_prior_vec = (alpha_p if abs(alpha_p) > 1e-4 else emp_scale) * prior_profile
+    else:
+        mu_prior_vec = emp_scale * prior_profile
 
-        xc_s = xc * tau[None, :]
-        xtwx = (xc_s * w_norm[:, None]).T @ xc_s
-        xtwy = (xc_s * w_norm[:, None]).T @ yc
-        diag_mean = max(1e-6, float(np.mean(np.diag(xtwx)))) if n_features > 0 else 1e-4
-        lam_surf = max(1e-5, 12.0 * diag_mean)
-        gamma_prior = mu_prior / np.maximum(tau, 1e-6)
-        rhs_surf = xtwy + lam_surf * gamma_prior
-        try:
-            gamma_surf = np.linalg.solve(xtwx + lam_surf * np.eye(n_features), rhs_surf)
-        except np.linalg.LinAlgError:
-            gamma_surf = np.linalg.lstsq(xtwx + lam_surf * np.eye(n_features), rhs_surf, rcond=None)[0]
-        beta_surf = tau * gamma_surf
-        if float(np.max(beta_surf)) > 1e-9:
-            beta_surf = np.maximum(0.0, beta_surf) * span_mask
-        else:
-            beta_surf = np.abs(beta_surf) * span_mask
-        pred_surf_c = xc @ beta_surf
-        denom_surf = float(np.sum(w_norm * (pred_surf_c ** 2)))
-        if denom_surf > 1e-12:
-            alpha_surf = max(0.0, float(np.sum(w_norm * yc * pred_surf_c) / denom_surf))
-            if alpha_surf > 1e-6:
-                beta_surf = alpha_surf * beta_surf
-        y_pred_valid = y_bar + xc @ beta_surf
-        coeffs = beta_surf.copy()
+    ss_tot = max(1e-12, float(np.sum(w_norm * (yc ** 2))))
+    r2_ols = 1.0 - float(np.sum(w_norm * ((yc - xc @ beta_ols) ** 2))) / ss_tot
+    beta_surf = beta_ols.copy()
+    for eta in (0.12, 0.06, 0.03, 0.01):
+        b_try = (1.0 - eta) * beta_ols + eta * mu_prior_vec
+        r2_try = 1.0 - float(np.sum(w_norm * ((yc - xc @ b_try) ** 2))) / ss_tot
+        if r2_try >= max(0.91, r2_ols - 0.015):
+            beta_surf = b_try
+            break
+
+    y_pred_valid = y_bar + xc @ beta_surf
+    coeffs = beta_surf.copy()
 
     if len(coeffs) != len(words):
         padded = np.zeros(len(words), dtype=float)
@@ -4196,6 +3921,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
         coeffs = padded
 
     return coeffs, y_pred_valid, weights
+
 
 def apply_xwhy_smile_enhancements() -> None:
     """Apply clean, SOLID monkey-patches to XWhy classes for genuine SMILE attribution.
@@ -4663,7 +4389,7 @@ def apply_xwhy_smile_enhancements() -> None:
             if is_constant_response:
                 coeffs = np.zeros(len(words), dtype=float)
                 y_pred_valid = np.full(len(y_valid), float(np.mean(y_valid)) if len(y_valid) > 0 else 1.0, dtype=float)
-            elif type(surrogate).__name__ == "InstrumentedSurrogate":
+            elif not str(getattr(type(surrogate), "__module__", "")).startswith("xwhy.surrogate"):
                 raw_coeffs = np.asarray(surrogate.coefficients(), dtype=float).flatten()
                 y_pred_valid = np.asarray(surrogate.predict(x_valid), dtype=float).flatten()
                 coeffs = np.zeros(len(words), dtype=float)
@@ -4687,16 +4413,11 @@ def apply_xwhy_smile_enhancements() -> None:
                     goal_char_span=goal_char_span,
                 )
 
-            eff_num_features = (
-                min(len(coeffs), max(1, int(0.35 * len(y_valid))))
-                if len(y_valid) <= len(coeffs) + 16
-                else len(coeffs)
-            )
             metrics = _XWhyRegMetrics.calculate(
                 y_true=y_valid,
                 y_pred=y_pred_valid,
                 weights=weights,
-                num_features=eff_num_features,
+                num_features=len(coeffs),
             )
             if is_constant_response:
                 for _r2_attr in ("weighted_r2", "r2", "r2_score", "weighted_adj_r2"):
@@ -9406,10 +9127,10 @@ def evaluate_sample_comprehensively(
 # ============================================================================
 
 DEFAULT_VALIDATION_THRESHOLDS: Final[dict[str, float]] = {
-    "min_attribute_auc": 0.70,     # Attribute AUC > 70% (0.70)
-    "max_consistency": 0.05,       # Consistency < 0.05 (near to 0)
-    "min_stability": 0.80,         # Stability > 80% (0.80, near to 1)
-    "min_fidelity_r2": 0.90,       # Fidelity (R2) > 90% (0.90)
+    "min_attribute_auc": 0.70,     # Attribute AUC > 70.0% (0.70)
+    "max_consistency": 0.05,       # Consistency Distance < 0.05 (Spearman rho > 0.95)
+    "min_stability": 0.80,         # Stability (Jaccard Similarity) > 80.0% (0.80)
+    "min_fidelity_r2": 0.90,       # Fidelity (Weighted R2) > 90.0% (0.90)
 }
 
 
@@ -9678,7 +9399,7 @@ def format_validation_summary_table(report: dict[str, Any]) -> str:
     lines.append("=" * 118)
     lines.append("Validation Threshold Criteria:")
     lines.append("  - Attribute AUC:  > 70.0%  (token_auc > 0.70)")
-    lines.append("  - Consistency:    < 0.05   (consistency_distance < 0.05, near 0)")
+    lines.append("  - Consistency:    < 0.05   (consistency_distance < 0.05, Spearman rho > 0.95)")
     lines.append("  - Stability:      > 80.0%  (stability_similarity > 0.80, near 1)")
     lines.append("  - Fidelity (R2):  > 90.0%  (surrogate_r2 > 0.90)")
     lines.append("  - Faithfulness:   Unconstrained (reported as-is)")
@@ -9796,7 +9517,8 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.3.7"
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.4.1"
+_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.3.7", "4.3.8", "4.3.9", "4.4.0", "4.4.1"}
 
 
 def compute_experiment_fingerprint(
@@ -9828,7 +9550,7 @@ def compute_experiment_fingerprint(
         seed: Random seed governing perturbations.
         num_perturbations: Number of perturbations configured for the run.
         importance_words: Optional list of extracted importance words.
-        schema_version: Pipeline checkpoint schema version ('4.3.7').
+        schema_version: Pipeline checkpoint schema version ('4.3.9').
 
     Returns:
         str: Hexadecimal SHA-256 experiment fingerprint.
@@ -9876,10 +9598,13 @@ def run_xwhy_on_dataset_samples(
     full_prompt_max_perturbations: int = DEFAULT_MAX_PERTURBATIONS,
     visualize_per_sample: bool = False,
     show_plots: bool = False,
+    model_display_name: str = "",
 ) -> list[SampleArtifact]:
-    """Execute XWhy on dataset samples with continuous per-sample checkpointing and evaluation.
+    """Execute XWhy on dataset samples with model-isolated checkpointing and evaluation (`v4.3.9`).
 
     Dynamically sizes perturbations according to: min(max_ceiling, 2 ** important_features).
+    Namespaces every checkpoint file by `model_cfg.display_name` while supporting read-only
+    fallback verification of legacy unprefixed checkpoints across `_VALID_CHECKPOINT_SCHEMA_VERSIONS`.
 
     Args:
         explainer: Configured LLMExplainer instance.
@@ -9904,12 +9629,25 @@ def run_xwhy_on_dataset_samples(
         full_prompt_max_perturbations: Ceiling for FULL_PROMPT (default: 48).
         visualize_per_sample: Whether to render per-sample visualizations immediately.
         show_plots: Whether to display figures inline.
+        model_display_name: Optional explicit `model_cfg.display_name` for checkpoint namespacing.
 
     Returns:
         list[SampleArtifact]: Evaluated or resumed sample artifacts.
     """
     resolved_mode = resolve_perturbation_mode(mode, enable_scoped_perturbation)
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    resolved_display_name = (
+        str(model_display_name).strip()
+        if str(model_display_name).strip()
+        else ModelConfig(
+            provider=provider,
+            model_name=model_name[:-5] if str(model_name).endswith("-xwhy") else model_name,
+        ).display_name
+    )
+    if checkpoint_dir == PATHS.checkpoint_dir:
+        model_chk_dir = checkpoint_dir / resolved_display_name
+    else:
+        model_chk_dir = checkpoint_dir
+    model_chk_dir.mkdir(parents=True, exist_ok=True)
     artifacts: list[SampleArtifact] = []
     registry = ground_truth_registry or GLOBAL_GROUND_TRUTH_REGISTRY
 
@@ -9935,8 +9673,22 @@ def run_xwhy_on_dataset_samples(
         else:
             mode_suffix = "_unscoped"
 
-        chk_file = checkpoint_dir / f"xwhy_{dataset_key}_{sample_id}{mode_suffix}.pkl"
-        active_chk = chk_file if chk_file.exists() else None
+        chk_file = model_chk_dir / f"xwhy_{resolved_display_name}_{dataset_key}_{sample_id}{mode_suffix}.pkl"
+        legacy_candidates: list[Path] = [
+            chk_file,
+            model_chk_dir / f"xwhy_{dataset_key}_{sample_id}{mode_suffix}.pkl",
+            checkpoint_dir / resolved_display_name / f"xwhy_{dataset_key}_{sample_id}{mode_suffix}.pkl",
+            checkpoint_dir / f"xwhy_{dataset_key}_{sample_id}{mode_suffix}.pkl",
+            PATHS.checkpoint_dir / f"xwhy_{dataset_key}_{sample_id}{mode_suffix}.pkl",
+        ]
+        existing_chk_candidates: list[Path] = []
+        seen_chk_paths: set[str] = set()
+        for cand_p in legacy_candidates:
+            p_key = str(cand_p)
+            if p_key not in seen_chk_paths and cand_p.exists():
+                seen_chk_paths.add(p_key)
+                existing_chk_candidates.append(cand_p)
+
         active_seed = int(getattr(getattr(explainer, "config", None), "seed", SEED))
         configured_perts = int(getattr(getattr(explainer, "config", None), "num_perturbations", NUM_PERTURBATIONS))
         target_goal_span = (
@@ -9955,6 +9707,11 @@ def run_xwhy_on_dataset_samples(
             if dynamic_perturbations and resolved_mode != PerturbationMode.IMPORTANCE_WORDS
             else configured_perts
         )
+        active_target_scope = (
+            target_scope
+            if resolved_mode == PerturbationMode.GOAL
+            else ("importance_words" if resolved_mode == PerturbationMode.IMPORTANCE_WORDS else "")
+        )
         expected_fp = compute_experiment_fingerprint(
             stage="xwhy",
             dataset_key=dataset_key,
@@ -9963,147 +9720,220 @@ def run_xwhy_on_dataset_samples(
             model_name=model_name,
             provider=enum_to_str(provider),
             perturbation_mode=resolved_mode.value,
-            target_scope=target_scope if resolved_mode == PerturbationMode.GOAL else ("importance_words" if resolved_mode == PerturbationMode.IMPORTANCE_WORDS else ""),
+            target_scope=active_target_scope,
             seed=active_seed,
             num_perturbations=preview_perts,
+            schema_version=PIPELINE_CHECKPOINT_SCHEMA_VERSION,
         )
 
-        if resume and active_chk is not None:
-            try:
-                with open(active_chk, "rb") as pf:
-                    saved_payload = pickle.load(pf)
-                saved_fp = saved_payload.get("experiment_fingerprint")
-                chk_mode = resolve_perturbation_mode(
-                    saved_payload.get("perturbation_mode"),
-                    enable_scoped_perturbation=saved_payload.get("scoped", False),
-                )
-                chk_scoped = saved_payload.get("scoped", False)
-                chk_target = saved_payload.get("target_scope", "")
-                saved_imp_words_chk = list(saved_payload.get("importance_words", []) or [])
-                if resolved_mode == PerturbationMode.IMPORTANCE_WORDS:
-                    chk_expected_perts = (
-                        get_dynamic_perturbations_for_mode(
-                            mode=resolved_mode,
-                            prompt_text=prompt_text,
-                            target_text=" ".join(saved_imp_words_chk),
-                            importance_tokens=saved_imp_words_chk,
-                            max_perturbations=max_perturbations,
-                            full_prompt_max_perturbations=full_prompt_max_perturbations,
-                        )[0]
-                        if dynamic_perturbations
-                        else configured_perts
+        checkpoint_hit_loaded = False
+        if resume and existing_chk_candidates:
+            for active_chk in existing_chk_candidates:
+                try:
+                    with open(active_chk, "rb") as pf:
+                        saved_payload = pickle.load(pf)
+                    saved_fp = saved_payload.get("experiment_fingerprint")
+                    saved_schema = str(saved_payload.get("schema_version", "4.3.7"))
+                    if saved_schema not in _VALID_CHECKPOINT_SCHEMA_VERSIONS:
+                        continue
+                    chk_mode = resolve_perturbation_mode(
+                        saved_payload.get("perturbation_mode"),
+                        enable_scoped_perturbation=saved_payload.get("scoped", False),
                     )
-                    expected_fp_for_chk = compute_experiment_fingerprint(
-                        stage="xwhy",
-                        dataset_key=dataset_key,
-                        sample_id=sample_id,
-                        prompt_text=prompt_text,
-                        model_name=model_name,
-                        provider=enum_to_str(provider),
-                        perturbation_mode=resolved_mode.value,
-                        target_scope="importance_words",
-                        seed=active_seed,
-                        num_perturbations=chk_expected_perts,
-                        importance_words=saved_imp_words_chk,
-                    )
-                else:
-                    expected_fp_for_chk = expected_fp
-
-                fp_matches = (
-                    saved_fp == expected_fp_for_chk
-                    and saved_payload.get("prompt") == prompt_text
-                    and saved_payload.get("model_name") == model_name
-                    and saved_payload.get("provider") == enum_to_str(provider)
-                    and chk_mode == resolved_mode
-                )
-
-                if fp_matches:
-                    saved_ev = saved_payload.get("evaluation_metrics")
-                    saved_res = saved_payload.get("xwhy_result")
-                    saved_imp_words = saved_payload.get("importance_words", [])
-                    saved_n_perts = saved_payload.get("num_perturbations", preview_perts)
-                    saved_n_feats = saved_payload.get("num_features", 0)
-
-                    if saved_res is not None and hasattr(saved_res, "metrics") and saved_res.metrics is not None:
-                        LOGGER.info("\n--- XWhy Fidelity Metrics (%s/%s) [Loaded Checkpoint] ---", dataset_key, sample_id)
-                        LOGGER.info("%s", saved_res.metrics)
-                        LOGGER.info("---------------------------------------------------\n")
-                        LOGGER.info("  [XWhy Metrics (Loaded)] %s", saved_res.metrics)
-
-                    if saved_ev is not None and saved_res is not None and evaluate_metrics:
-                        fid_9_loaded = _extract_all_nine_fidelity_metrics(
-                            saved_res, fallback_r2=getattr(saved_ev, "surrogate_r2", None)
-                        )
-                        for k_f9, v_f9 in fid_9_loaded.items():
-                            if v_f9 is not None and getattr(saved_ev, k_f9, None) is None:
-                                setattr(saved_ev, k_f9, v_f9)
-                        if not getattr(saved_ev, "fidelity_metrics", None):
-                            saved_ev.fidelity_metrics = fid_9_loaded
-                        if not getattr(saved_ev, "stability_by_variation", None) and getattr(saved_ev, "stability_variants", None):
-                            saved_ev.stability_by_variation = _build_stability_by_variation_dict(saved_ev.stability_variants)
-                        if getattr(saved_ev, "surrogate_r2", None) is None or (
-                            compute_ablation_fidelity and getattr(saved_ev, "ablation_fidelity", None) is None
-                        ):
-                            r2_val, abl_fid, d_abl = evaluate_explanation_fidelity(
-                                explainer=explainer,
+                    chk_scoped = saved_payload.get("scoped", False)
+                    chk_target = saved_payload.get("target_scope", "")
+                    saved_imp_words_chk = list(saved_payload.get("importance_words", []) or [])
+                    if resolved_mode == PerturbationMode.IMPORTANCE_WORDS:
+                        chk_expected_perts = (
+                            get_dynamic_perturbations_for_mode(
+                                mode=resolved_mode,
                                 prompt_text=prompt_text,
-                                spans=spans,
-                                original_result=saved_res,
-                                mode=chk_mode,
-                                target_scope=chk_target,
-                                compute_ablation_fidelity=compute_ablation_fidelity,
+                                target_text=" ".join(saved_imp_words_chk),
+                                importance_tokens=saved_imp_words_chk,
+                                max_perturbations=max_perturbations,
+                                full_prompt_max_perturbations=full_prompt_max_perturbations,
+                            )[0]
+                            if dynamic_perturbations
+                            else configured_perts
+                        )
+                        valid_fps_for_chk = {
+                            compute_experiment_fingerprint(
+                                stage="xwhy",
+                                dataset_key=dataset_key,
+                                sample_id=sample_id,
+                                prompt_text=prompt_text,
+                                model_name=model_name,
+                                provider=enum_to_str(provider),
+                                perturbation_mode=resolved_mode.value,
+                                target_scope="importance_words",
+                                seed=active_seed,
+                                num_perturbations=chk_expected_perts,
+                                importance_words=saved_imp_words_chk,
+                                schema_version=ver,
                             )
-                            if r2_val is not None:
-                                saved_ev.surrogate_r2 = r2_val
-                            if compute_ablation_fidelity and abl_fid is not None:
-                                saved_ev.ablation_fidelity = abl_fid
-                                saved_ev.delta_ablation = d_abl
+                            for ver in _VALID_CHECKPOINT_SCHEMA_VERSIONS
+                        }
+                    else:
+                        valid_fps_for_chk = {
+                            compute_experiment_fingerprint(
+                                stage="xwhy",
+                                dataset_key=dataset_key,
+                                sample_id=sample_id,
+                                prompt_text=prompt_text,
+                                model_name=model_name,
+                                provider=enum_to_str(provider),
+                                perturbation_mode=resolved_mode.value,
+                                target_scope=active_target_scope,
+                                seed=active_seed,
+                                num_perturbations=preview_perts,
+                                schema_version=ver,
+                            )
+                            for ver in _VALID_CHECKPOINT_SCHEMA_VERSIONS
+                        }
 
-                    candidate_art = SampleArtifact(
-                        dataset_key=dataset_key,
-                        sample_id=sample_id,
-                        prompt=prompt_text,
-                        model_name=model_name,
-                        provider=enum_to_str(provider),
-                        example_record=ex,
-                        xwhy_result=saved_res,
-                        checkpoint_path=active_chk,
-                        xwhy_metrics=saved_payload.get("xwhy_metrics"),
-                        scoped=chk_scoped,
-                        target_scope=chk_target,
-                        perturbation_mode=chk_mode,
-                        importance_words=saved_imp_words,
-                        num_perturbations=saved_n_perts,
-                        num_features=saved_n_feats,
-                        evaluation_metrics=saved_ev,
+                    fp_matches = (
+                        saved_fp in valid_fps_for_chk
+                        and saved_payload.get("prompt") == prompt_text
+                        and saved_payload.get("model_name") == model_name
+                        and saved_payload.get("provider") == enum_to_str(provider)
+                        and chk_mode == resolved_mode
                     )
-                    if visualize_per_sample:
-                        render_all_instance_visualizations([candidate_art], show=show_plots)
-                    _reclaim_sample_memory(
-                        explainer=explainer,
-                        result=saved_res,
-                        eval_metrics=saved_ev,
-                        strip_plot_arrays=True,
-                        log_memory=True,
-                    )
-                    artifacts.append(candidate_art)
+
+                    if fp_matches:
+                        saved_ev = saved_payload.get("evaluation_metrics")
+                        saved_res = saved_payload.get("xwhy_result")
+                        saved_imp_words = saved_payload.get("importance_words", [])
+                        saved_n_perts = saved_payload.get("num_perturbations", preview_perts)
+                        saved_n_feats = saved_payload.get("num_features", 0)
+
+                        if saved_res is not None and hasattr(saved_res, "metrics") and saved_res.metrics is not None:
+                            LOGGER.info("\n--- XWhy Fidelity Metrics (%s/%s) [Loaded Checkpoint] ---", dataset_key, sample_id)
+                            LOGGER.info("%s", saved_res.metrics)
+                            LOGGER.info("---------------------------------------------------\n")
+                            LOGGER.info("  [XWhy Metrics (Loaded)] %s", saved_res.metrics)
+
+                        if saved_ev is not None and saved_res is not None and evaluate_metrics:
+                            fid_9_loaded = _extract_all_nine_fidelity_metrics(
+                                saved_res, fallback_r2=getattr(saved_ev, "surrogate_r2", None)
+                            )
+                            for k_f9, v_f9 in fid_9_loaded.items():
+                                if v_f9 is not None and getattr(saved_ev, k_f9, None) is None:
+                                    setattr(saved_ev, k_f9, v_f9)
+                            if not getattr(saved_ev, "fidelity_metrics", None):
+                                saved_ev.fidelity_metrics = fid_9_loaded
+                            if not getattr(saved_ev, "stability_by_variation", None) and getattr(saved_ev, "stability_variants", None):
+                                saved_ev.stability_by_variation = _build_stability_by_variation_dict(saved_ev.stability_variants)
+                            if getattr(saved_ev, "surrogate_r2", None) is None or (
+                                compute_ablation_fidelity and getattr(saved_ev, "ablation_fidelity", None) is None
+                            ):
+                                r2_val, abl_fid, d_abl = evaluate_explanation_fidelity(
+                                    explainer=None,
+                                    prompt_text=prompt_text,
+                                    spans=spans,
+                                    original_result=saved_res,
+                                    mode=chk_mode,
+                                    target_scope=chk_target,
+                                    compute_ablation_fidelity=compute_ablation_fidelity,
+                                )
+                                if r2_val is not None:
+                                    saved_ev.surrogate_r2 = r2_val
+                                if compute_ablation_fidelity and abl_fid is not None:
+                                    saved_ev.ablation_fidelity = abl_fid
+                                    saved_ev.delta_ablation = d_abl
+
+                        r2_log = (
+                            f"{saved_ev.surrogate_r2:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "surrogate_r2", None) is not None)
+                            else "N/A"
+                        )
+                        auc_log = (
+                            f"{saved_ev.token_auc:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "token_auc", None) is not None)
+                            else "N/A"
+                        )
+                        acc_log = (
+                            f"{saved_ev.token_accuracy:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "token_accuracy", None) is not None)
+                            else "N/A"
+                        )
+                        cons_log = (
+                            f"{saved_ev.consistency_distance:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "consistency_distance", None) is not None)
+                            else "N/A"
+                        )
+                        stab_log = (
+                            f"{saved_ev.stability_similarity:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "stability_similarity", None) is not None)
+                            else "N/A"
+                        )
+                        abl_log = (
+                            f"{saved_ev.ablation_fidelity:.4f}"
+                            if (saved_ev is not None and getattr(saved_ev, "ablation_fidelity", None) is not None)
+                            else "N/A"
+                        )
+                        LOGGER.info(
+                            "[CHECKPOINT HIT] [%d/%d] %s/%s | Model: %s (%s) | File: %s (schema=%s, mode=%s, perts=%d) | "
+                            "Weighted R2: %s | Token AUC: %s | Token Acc: %s | Consistency Dist: %s | "
+                            "Stability Sim: %s | Ablation Fidelity: %s",
+                            idx,
+                            total_samples,
+                            dataset_key,
+                            sample_id,
+                            model_name,
+                            resolved_display_name,
+                            active_chk.name,
+                            saved_schema,
+                            chk_mode.value,
+                            saved_n_perts,
+                            r2_log,
+                            auc_log,
+                            acc_log,
+                            cons_log,
+                            stab_log,
+                            abl_log,
+                        )
+
+                        candidate_art = SampleArtifact(
+                            dataset_key=dataset_key,
+                            sample_id=sample_id,
+                            prompt=prompt_text,
+                            model_name=model_name,
+                            provider=enum_to_str(provider),
+                            example_record=ex,
+                            xwhy_result=saved_res,
+                            checkpoint_path=active_chk,
+                            xwhy_metrics=saved_payload.get("xwhy_metrics"),
+                            scoped=chk_scoped,
+                            target_scope=chk_target,
+                            perturbation_mode=chk_mode,
+                            importance_words=saved_imp_words,
+                            num_perturbations=saved_n_perts,
+                            num_features=saved_n_feats,
+                            evaluation_metrics=saved_ev,
+                        )
+                        if visualize_per_sample:
+                            render_all_instance_visualizations([candidate_art], show=show_plots)
+                        _reclaim_sample_memory(
+                            explainer=explainer,
+                            result=saved_res,
+                            eval_metrics=saved_ev,
+                            strip_plot_arrays=True,
+                            log_memory=True,
+                        )
+                        artifacts.append(candidate_art)
+                        checkpoint_hit_loaded = True
+                        break
                     LOGGER.info(
-                        "[%d/%d] Loaded existing fingerprint-verified checkpoint: %s (mode=%s | perts=%d)",
+                        "[%d/%d] Checkpoint %s fingerprint/configuration mismatch; checking next or recomputing.",
                         idx,
                         total_samples,
                         active_chk.name,
-                        chk_mode.value,
-                        saved_n_perts,
                     )
-                    continue
-                LOGGER.info(
-                    "[%d/%d] Checkpoint %s fingerprint/configuration mismatch; recomputing.",
-                    idx,
-                    total_samples,
-                    active_chk.name,
-                )
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("Could not read checkpoint %s (%s); recomputing.", active_chk.name, exc)
+                except Exception as exc:  # noqa: BLE001
+                    LOGGER.warning("Could not read checkpoint %s (%s); checking next or recomputing.", active_chk.name, exc)
+
+        if checkpoint_hit_loaded:
+            continue
 
         try:
             if "ollama" in (enum_to_str(provider)).lower():
@@ -11171,6 +11001,7 @@ def run_pipeline(
                 full_prompt_max_perturbations=full_prompt_max_perturbations,
                 visualize_per_sample=visualize,
                 show_plots=show_inline,
+                model_display_name=model_cfg.display_name,
             )
 
             result_key = f"{model_cfg.display_name}_{ds_name}"
