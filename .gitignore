@@ -204,7 +204,7 @@ pyrightconfig.json
 .ionide
 
 # Ignore all .md files anywhere in the repository
-*.md
+# *.md
 
 # Exclude your specific file from being ignored
 !README.md

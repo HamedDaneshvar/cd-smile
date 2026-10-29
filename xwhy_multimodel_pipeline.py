@@ -1432,7 +1432,6 @@ def run_pipeline(
     log_all_metric_markdown_tables(evaluation_records=evaluation_records)
 
     LOGGER.info("\nPipeline execution completed across all active models and datasets.")
-    return all_results
 
 
 # ============================================================================

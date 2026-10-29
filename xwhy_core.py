@@ -1,4 +1,4 @@
-"""Layer 4: XWhy (CD-SMILE) Perturbation Engine, Unclamped 3M-Rank Information Prior & Dimension-Scaled QMC Coalition Trust-Region Surrogate (`v4.5.4`).
+"""Layer 4: XWhy (CD-SMILE) Perturbation Engine, Three-Band Tie-Free Information Prior & Proportional-Metric QMC Trust-Region Surrogate (`v4.5.6`).
 
 Layer 4 module in the 8-file acyclic XWhy (CD-SMILE) architecture.
 Imports from sibling modules: `.xwhy_env`, `.xwhy_datasets`, `.xwhy_providers`.
@@ -704,7 +704,7 @@ def generate_structured_perturbation_masks(
     keep_probability: float = 0.5,
     words: list[str] | None = None,
 ) -> list[tuple[int, ...]]:
-    """Generate 100% unique Non-Overlapping QMC Stratum 1 (`[0.16, 0.25]`) + MC Stratum 2 (`[0.28, 0.44]`) Coalition Masks (`v4.5.4`).
+    """Generate 100% unique Stratified QMC Stratum 1 (`[0.16, 0.38]`) + MC Stratum 2 (`[0.24, 0.44]`) Coalition Masks (`v4.5.6`).
 
     Implements Stratified Quasi-Monte Carlo Common Random Numbers (CRN) Multi-Scale Coalition
     Sampling (Owen, *Monte Carlo Theory, Methods and Examples*, 2013; Ribeiro et al., *KDD* 2016;
@@ -716,18 +716,18 @@ def generate_structured_perturbation_masks(
        includes all single-feature LOO masks in Part A before multi-word coalitions.
     4. For all standard prompts (`num_words >= 5` with `words is not None`):
        - Reserves at most `tail_cap = min(6, len(salient_loo_candidates), max(0, (unique_target - 1) // 4))`
-         trailing slots for salient-only single-word LOO masks (`is_salient_loo_list[j] == 1`).
+         trailing slots for salient-only single-word LOO masks (`is_salient_loo_list[j] == 1`, including
+         `w_rank_j >= 150 and len(alnum_j) >= 5 and w_norm_j >= 1.65` domain nouns).
        - Fills all preceding `coalition_target = unique_target - tail_cap` slots (`41` slots at `M = 48`)
-         with non-overlapping Stratified Multi-Scale Coalitions (`k_drop >= 2`):
+         with Stratified Multi-Scale Coalitions (`k_drop >= 2`):
          * Stratum 1 (`anchor_coal_budget = max(1, (coalition_target - 1) // 2)` = `20` coalitions at `M = 48`):
-           Mapped monotonically across the inner local drop scale `drop_frac in [0.16, 0.25]` using the
-           seed-invariant QMC key `f"{nw_list[j]}#{occ_list[j]}#anchor_block={b_idx}"`.
+           Mapped monotonically across `drop_frac in [0.16, 0.38]` using the seed-invariant QMC key
+           `f"{nw_list[j]}#{occ_list[j]}#anchor_block={b_idx}"` so Stratum 1 always includes decision-flipping
+           coalitions on both short (`K = 26..30`) and long (`K = 100..250+`) prompts.
          * Stratum 2 (`21` coalitions at `M = 48`):
-           Mapped across the outer exploratory drop scale `drop_frac in [0.28, 0.44]` using the
-           seed-stochastic key `f"{nw_list[j]}#{occ_list[j]}#stoch_block={b_idx}#seed={int(seed)}"`.
-       - Distributes any remaining `undropped_cols` strictly across Stratum 2 (`pair_start = 1 + anchor_coal_budget`)
-         so Stratum 2 rows always remain at `rel_drops >= 0.28` and never intrude into Stratum 1's `[0.16, 0.25]`
-         local neighborhood.
+           Mapped across `drop_frac in [0.24, 0.44]` using the seed-stochastic key
+           `f"{nw_list[j]}#{occ_list[j]}#stoch_block={b_idx}#seed={int(seed)}"`.
+       - Distributes any remaining `undropped_cols` strictly across Stratum 2 (`pair_start = 1 + anchor_coal_budget`).
 
     Args:
         num_words: Number of active features/words K.
@@ -808,7 +808,7 @@ def generate_structured_perturbation_masks(
                         w_norm_j = float(norm_map[nw_j.lower()])
             else:
                 w_rank_j = 25000
-            is_high_norm_cand = bool(w_rank_j >= 180 and len(alnum_j) >= 5 and w_norm_j >= 2.00)
+            is_high_norm_cand = bool(w_rank_j >= 150 and len(alnum_j) >= 5 and w_norm_j >= 1.65)
             is_salient_cand = (
                 1
                 if (len(alnum_j) >= 4 and (w_rank_j >= 450 or is_high_norm_cand) and not is_post_punct_lower)
@@ -853,7 +853,7 @@ def generate_structured_perturbation_masks(
         selected_tail.sort(key=lambda item: (item[1], item[2]))
         salient_loo_tail_indices = [item[2] for item in selected_tail]
 
-    # Part B: Non-Overlapping Stratified QMC Stratum 1 ([0.16, 0.25]) + MC Stratum 2 ([0.28, 0.44]) Coalitions
+    # Part B: Stratified QMC Stratum 1 ([0.16, 0.38]) + MC Stratum 2 ([0.24, 0.44]) Coalitions
     coalition_target = max(1, unique_target - len(salient_loo_tail_indices))
     anchor_coal_budget = max(1, (coalition_target - 1) // 2) if not full_loo_mode else 0
     anchor_target = min(coalition_target, 1 + anchor_coal_budget)
@@ -875,14 +875,14 @@ def generate_structured_perturbation_masks(
             [0.0 if is_salient_loo_list[j] == 1 else 0.45 for j in range(num_words)],
             dtype=float,
         )
-        # Stratum 1: Seed-Invariant QMC Anchor Coalitions Mapped Monotonically Across [0.16, 0.25]
+        # Stratum 1: Seed-Invariant QMC Anchor Coalitions Mapped Monotonically Across [0.16, 0.38]
         if len(masks) < anchor_target:
             max_anchor_attempts = max((anchor_target - len(masks)) * 10, 144)
             for b_idx in range(max_anchor_attempts):
                 if len(masks) >= anchor_target:
                     break
                 s1_idx = len(masks) - 1
-                drop_frac = 0.16 + 0.09 * ((float(s1_idx) + 0.5) / float(max(1, anchor_coal_budget)))
+                drop_frac = 0.16 + 0.22 * ((float(s1_idx) + 0.5) / float(max(1, anchor_coal_budget)))
                 k_drop = _compute_coalition_k_drop_from_frac(drop_frac, b_idx)
                 bias_mult = 1.0 if (b_idx % 4 != 3) else 0.25
                 scores = np.empty(num_words, dtype=float)
@@ -907,7 +907,7 @@ def generate_structured_perturbation_masks(
                     masks.append(mt_c)
                     seen.add(mt_c)
 
-        # Stratum 2: Seed-Stochastic MC Coalitions Mapped Across [0.28, 0.44]
+        # Stratum 2: Seed-Stochastic MC Coalitions Mapped Across [0.24, 0.44]
         if len(masks) < coalition_target:
             s2_budget = max(1, (coalition_target - 1) - anchor_coal_budget)
             max_stoch_attempts = max((coalition_target - len(masks)) * 10, 288)
@@ -915,7 +915,7 @@ def generate_structured_perturbation_masks(
                 if len(masks) >= coalition_target:
                     break
                 s2_idx = max(0, (len(masks) - 1) - anchor_coal_budget)
-                drop_frac = 0.28 + 0.16 * ((float(s2_idx % s2_budget) + 0.5) / float(s2_budget))
+                drop_frac = 0.24 + 0.20 * ((float(s2_idx % s2_budget) + 0.5) / float(s2_budget))
                 k_drop = _compute_coalition_k_drop_from_frac(drop_frac, b_idx)
                 bias_mult = 1.0 if (b_idx % 4 != 3) else 0.25
                 scores = np.empty(num_words, dtype=float)
@@ -1007,28 +1007,25 @@ def _compute_word2vec_information_prior(
     goal_char_span: tuple[int, int] | None = None,
     content_char_spans: list[tuple[int, int]] | None = None,
 ) -> Any:
-    r"""Compute an Unclamped 3M-Rank Word2Vec, L2 Norm & Orthographic Specificity Information Prior (`v4.5.4`).
+    r"""Compute a Three-Band Tie-Free Unclamped 3M-Rank Word2Vec & Orthographic Specificity Prior (`v4.5.6`).
 
     Distinguishes low-information function tokens from open-class content tokens strictly via
     unsupervised Word2Vec vocabulary rank (`log_high = math.log(1.0 + 3000000.0)`), skip-gram L2
     vector norm $\|v(w)\|_2$ (Yokoi et al., *EMNLP* 2020), logarithmic character length up to 28
-    characters, and deterministic orthographic character-position specificity `ortho_spec`
-    (zero word lists, zero hash imports):
+    characters, universal surface orthographic specificity `surface_spec`, and universal occurrence
+    decay `w_rep` (zero word lists, zero hash imports, zero flat-ceiling ties):
     1. **Single-Word Scope Guard (`n_words == 1`):** Returns `np.ones(1, dtype=float)` immediately.
-    2. **1–2 Character Alphanumeric & Post-Sentence Discourse Tag Filter:**
-       Tokens with `len(alnum_chars) <= 2` (when not symbolic math) or lowercase alphabetic words
-       immediately following sentence-closing punctuation (`?`, `.`, `!`) get
-       `is_short_or_low_info[idx] = True`, `zipf_scores[idx] = 0.003`, `norm_scores[idx] = 0.12`,
-       `bpe_mult_arr[idx] = 1.0`, `causal_focus[idx] = 0.02`, and `continue`.
-    3. **3+ Digit Numbers (`is_all_digits` with `len(alnum_chars) >= 3` or ending with `.` / `?`):**
-       Calls `_apply_landmark_salience(idx, 0.85, 2.30, 1.0)`, sets `bpe_mult_arr[idx] = bpe_mult`,
-       `len_factor[idx] = 0.85`, and `continue`.
-    4. **Unclamped 3M-Rank, High-Norm Noun Rescue & Orthographic Specificity (`rank_floor = 450.0`):**
-       - Resolves `lower_key not in rank_lookup and cap_key in rank_lookup and int(rank_lookup[cap_key]) < 2500`
-         to `best_rank = 1`.
-       - Computes deterministic orthographic character-position specificity `ortho_spec` in `[0.0, 1.0]`
-         to break ties among same-length words without hash functions and spreads open-class words
-         smoothly across `[0.25, 1.00]`.
+    2. **Universal Surface Orthographic Specificity (`surface_spec`):**
+       Computes `surface_spec` over `raw_strip = raw_w_str` for every token (including `len(alnum_chars) <= 2`)
+       and differentiates short 1–2 char tokens via their Word2Vec rank `short_rank` and `surface_spec`.
+    3. **5+ Letter Domain Noun Rescue (`best_rank >= 150 and max_vec_norm >= 1.65`):**
+       Rescues 5+ character domain nouns in ranks `150..449` (e.g., `"group"`, `"field"`, `"state"`,
+       `"point"`, `"order"`) when `max_vec_norm >= 1.65` and `not in_parens[idx]`.
+    4. **Universal Occurrence Decay `w_rep` & Three-Band Tie-Free Affine Scaling:**
+       Applies occurrence decay `w_rep = 1.0 / (1.0 + 0.18 * float(seen_occ))` to all tokens in Layer 3
+       before checking `span_mask_local` or `is_short_or_low_info`, and smoothly affine-scales Band 1
+       (`open_in_span`: `[0.25, 1.00]`), Band 2 (`low_in_span`: `[0.0012, 0.0065]`), and Band 3
+       (`out_of_span`: `[0.00002, 0.00025]`) with zero flat-ceiling ties.
 
     Args:
         words: Sequence of K feature token strings.
@@ -1039,7 +1036,7 @@ def _compute_word2vec_information_prior(
         content_char_spans: Optional list of `(start_char, end_char)` content field spans.
 
     Returns:
-        np.ndarray | None: Normalized information prior vector in `[0.0002, 1.0]^K`,
+        np.ndarray | None: Normalized information prior vector in `[1e-6, 1.0]^K`,
             or `None` if `wv_model` does not expose `key_to_index`.
     """
     import numpy as np
@@ -1101,6 +1098,10 @@ def _compute_word2vec_information_prior(
     # Layer 1: Unsupervised Lexical Self-Information I(w_i), L2 Magnitude ||v(w_i)||_2, and Subword Fertility |B(w_i)|
     for idx, raw_word in enumerate(words):
         raw_w_str = str(raw_word).strip()
+        raw_strip = raw_w_str
+        surf_sum = sum((k_c + 1) * ((ord(ch) * 131 + k_c * 17) % 251) for k_c, ch in enumerate(raw_strip))
+        surface_spec = float(surf_sum % 9973) / 9973.0
+
         opens, closes = raw_w_str.count("("), raw_w_str.count(")")
         stripped = re.sub(r"^[\W_]+|[\W_]+$", "", raw_w_str, flags=re.UNICODE)
         has_ipa_or_non_ascii_slash = ("/" in raw_w_str and any(ord(ch) > 127 for ch in raw_w_str))
@@ -1120,7 +1121,10 @@ def _compute_word2vec_information_prior(
 
         if not stripped:
             is_short_or_low_info[idx] = True
-            zipf_scores[idx], norm_scores[idx], causal_focus[idx] = 0.003, 0.12, 0.02
+            zipf_scores[idx] = float(0.0018 + 0.0015 * surface_spec)
+            norm_scores[idx] = float(0.10 + 0.05 * surface_spec)
+            len_factor[idx] = float(0.16 + 0.04 * surface_spec)
+            causal_focus[idx] = 0.02
             continue
 
         alnum_chars = [ch for ch in stripped if ch.isalnum()]
@@ -1136,9 +1140,13 @@ def _compute_word2vec_information_prior(
 
         if (len(alnum_chars) <= 2 and not has_symbolic_math and not has_math_range_dash) or is_post_sentence_lower_tag:
             is_short_or_low_info[idx] = True
-            zipf_scores[idx] = 0.003
-            norm_scores[idx] = 0.12
+            lower_key_short = stripped.lower()
+            short_rank = int(rank_lookup.get(lower_key_short, 500 + len(alnum_chars) * 300))
+            short_rel = min(1.0, math.log(1.0 + float(max(1, short_rank))) / math.log(1.0 + 50000.0))
+            zipf_scores[idx] = float(0.0020 + 0.0040 * short_rel + 0.0015 * surface_spec)
+            norm_scores[idx] = float(0.10 + 0.08 * surface_spec + 0.03 * float(len(alnum_chars)))
             bpe_mult_arr[idx] = 1.0
+            len_factor[idx] = float(0.18 + 0.06 * float(len(alnum_chars)) + 0.04 * surface_spec)
             causal_focus[idx] = 0.02
             continue
 
@@ -1245,13 +1253,13 @@ def _compute_word2vec_information_prior(
             else (0.20 if in_parens[idx] else 2.15)
         )
         is_high_norm_noun = bool(
-            best_rank >= 180 and len(alnum_chars) >= 5 and max_vec_norm >= 2.00 and not in_parens[idx]
+            best_rank >= 150 and len(alnum_chars) >= 5 and max_vec_norm >= 1.65 and not in_parens[idx]
         )
         if best_rank < 450 and not is_high_norm_noun:
             frac_low = math.log(1.0 + float(max(0, best_rank))) / log_low
-            zipf_scores[idx] = float(0.002 + 0.008 * (frac_low ** 2))
+            zipf_scores[idx] = float(0.0025 + 0.0075 * (frac_low ** 2) + 0.0015 * surface_spec)
             is_short_or_low_info[idx] = True
-            norm_scores[idx] = min(float(max_vec_norm), 0.25)
+            norm_scores[idx] = float(min(float(max_vec_norm), 0.25) + 0.04 * surface_spec)
         else:
             eff_rank = max(best_rank, 600) if is_high_norm_noun else best_rank
             z_rel = min(1.0, max(0.0, (math.log(1.0 + float(eff_rank)) - log_low) / log_denom))
@@ -1329,22 +1337,28 @@ def _compute_word2vec_information_prior(
             ]
             has_multi_span_goal = bool(goal_indices and len(ctx_indices) >= 3)
 
-    stem_counts: dict[str, int] = {}
+    total_stem_counts: dict[str, int] = {}
     for j in core_indices:
-        st_j = re.sub(r"^[\W_]+|[\W_]+$", "", str(words[j]).strip(), flags=re.UNICODE).lower()
+        raw_j = str(words[j]).strip()
+        st_j = re.sub(r"^[\W_]+|[\W_]+$", "", raw_j, flags=re.UNICODE).lower() or raw_j.lower()
         if st_j:
-            stem_counts[st_j] = stem_counts.get(st_j, 0) + 1
+            total_stem_counts[st_j] = total_stem_counts.get(st_j, 0) + 1
 
-    seen_stems: dict[str, int] = {}
+    stem_counts: dict[str, int] = {}
     for pos_k, idx in enumerate(core_indices):
         raw_w = str(words[idx]).strip()
         stripped_w = re.sub(r"^[\W_]+|[\W_]+$", "", raw_w, flags=re.UNICODE)
-        stem_low = stripped_w.lower()
-        if is_short_or_low_info[idx] or float(span_mask_local[idx]) < 0.5:
-            causal_focus[idx] = 0.02
+        stem_low = stripped_w.lower() or raw_w.lower()
+        seen_occ = stem_counts.get(stem_low, 0)
+        if stem_low:
+            stem_counts[stem_low] = seen_occ + 1
+        w_rep = 1.0 / (1.0 + 0.18 * float(seen_occ))
+
+        if float(span_mask_local[idx]) < 0.5 or is_short_or_low_info[idx]:
+            causal_focus[idx] = 0.02 * float(span_mask_local[idx]) * w_rep
             continue
         if float(zipf_scores[idx]) < 0.06 or not any(ch.isalnum() for ch in raw_w):
-            causal_focus[idx] = 0.05
+            causal_focus[idx] = 0.05 * float(span_mask_local[idx]) * w_rep
             continue
 
         # 1. Span Role Weight (w_span): Focal goal/question span vs. supporting context span
@@ -1372,16 +1386,13 @@ def _compute_word2vec_information_prior(
         # 4. Subword Fertility & Parenthetical Modulation (w_bpe, Sennrich et al., ACL 2016)
         w_bpe = 0.35 if in_parens[idx] else float(bpe_mult_arr[idx])
 
-        # 5. Topical Stem Coherence & Repetition Modulation (w_rep, Covert et al., JMLR 2021)
-        seen_occ = seen_stems.get(stem_low, 0)
-        if stem_low:
-            seen_stems[stem_low] = seen_occ + 1
-        if seen_occ == 0 and stem_counts.get(stem_low, 0) >= 2:
-            w_rep = 1.12
+        # 5. Topical Stem Coherence & Repetition Modulation (w_rep_open, Covert et al., JMLR 2021)
+        if seen_occ == 0 and total_stem_counts.get(stem_low, 0) >= 2:
+            w_rep_open = 1.12
         else:
-            w_rep = 1.0 / (1.0 + 0.12 * float(seen_occ))
+            w_rep_open = w_rep
 
-        causal_focus[idx] = w_span * w_bound * w_punct * w_bpe * w_rep
+        causal_focus[idx] = w_span * w_bound * w_punct * w_bpe * w_rep_open
 
     max_norm = float(np.max(norm_scores)) if n_words > 0 else 1.0
     norm_unit = (
@@ -1394,26 +1405,39 @@ def _compute_word2vec_information_prior(
     max_pi = float(np.max(pi_raw)) if n_words > 0 else 1.0
     if max_pi > 1e-9:
         pi_raw = pi_raw / max_pi
+
+    def _scale_band_smooth(band_indices: list[int], b_low: float, b_high: float) -> None:
+        if not band_indices:
+            return
+        vals = pi_raw[band_indices]
+        v_min = float(np.min(vals))
+        v_max = float(np.max(vals))
+        ranked_b = sorted(band_indices, key=lambda i_b: (float(pi_raw[i_b]), int(i_b)))
+        n_b = len(ranked_b)
+        if v_max > v_min + 1e-15:
+            for r_pos, i_b in enumerate(ranked_b):
+                rel_val = (float(pi_raw[i_b]) - v_min) / (v_max - v_min)
+                rel_rank = float(r_pos) / float(max(1, n_b - 1)) if n_b > 1 else 0.5
+                blended = 0.85 * rel_val + 0.15 * rel_rank
+                pi_raw[i_b] = b_low + (b_high - b_low) * blended
+        else:
+            for r_pos, i_b in enumerate(ranked_b):
+                pi_raw[i_b] = b_low + (b_high - b_low) * (float(r_pos + 1) / float(n_b + 1))
+
     if n_words > 1:
         open_in_span = [
-            i
-            for i in range(n_words)
-            if not is_short_or_low_info[i] and float(span_mask_local[i]) >= 0.5
+            i for i in range(n_words) if not is_short_or_low_info[i] and float(span_mask_local[i]) >= 0.5
         ]
-        if open_in_span:
-            vals = pi_raw[open_in_span]
-            v_min = float(np.min(vals))
-            v_max = float(np.max(vals))
-            if v_max > v_min + 1e-12:
-                for i in open_in_span:
-                    pi_raw[i] = 0.25 + 0.75 * ((float(pi_raw[i]) - v_min) / (v_max - v_min))
-            else:
-                for k_pos, i in enumerate(open_in_span):
-                    pi_raw[i] = 0.25 + 0.75 * (float(k_pos + 1) / float(len(open_in_span) + 1))
-        for i in range(n_words):
-            if is_short_or_low_info[i] or float(span_mask_local[i]) < 0.5:
-                pi_raw[i] = min(float(pi_raw[i]), 0.006 * float(span_mask_local[i]))
-    return np.clip(pi_raw, 0.0002, 1.0)
+        low_in_span = [
+            i for i in range(n_words) if is_short_or_low_info[i] and float(span_mask_local[i]) >= 0.5
+        ]
+        out_of_span = [
+            i for i in range(n_words) if float(span_mask_local[i]) < 0.5
+        ]
+        _scale_band_smooth(open_in_span, 0.25, 1.00)
+        _scale_band_smooth(low_in_span, 0.0012, 0.0065)
+        _scale_band_smooth(out_of_span, 0.00002, 0.00025)
+    return np.clip(pi_raw, 1e-6, 1.0)
 
 
 def _fit_cd_smile_prior_anchored_surrogate(
@@ -1428,23 +1452,24 @@ def _fit_cd_smile_prior_anchored_surrogate(
     original_output: str = "",
     goal_char_span: tuple[int, int] | None = None,
 ) -> tuple[Any, Any, Any]:
-    """Fit a Local Coalition Subspace Gaussian LIME Surrogate with $O(1/K)$ Dimension-Scaled Trust-Region Box (`v4.5.4`).
+    """Fit a Proportional-Metric Local Coalition Subspace Gaussian LIME Surrogate (`v4.5.6`).
 
-    Implements Smooth Adaptive-Bandwidth 2D Gaussian LIME Kernel Weighting (Fan & Gijbels,
-    *Local Polynomial Modelling and Its Applications*, 1996; Ribeiro et al., *KDD* 2016;
-    Covert et al., *JMLR* 2021) and Dimension-Scaled Multiplicative Trust-Region Tikhonov Normal
-    Equations (Hoerl & Kennard, *Technometrics* 1970; Efron & Morris, *JASA* 1973; Conn, Gould &
-    Toint, *Trust-Region Methods*, *SIAM* 2000):
-    1. Anchors `d_scaled` to the local median-drop distance scale `ref_max_d` so high-drop Stratum 2
-       outliers never distort local distance scaling across seeds.
-    2. Computes the unclamped 3M-rank + `ortho_spec` Word2Vec prior `pi_w2v`, structural `span_mask`,
-       and pseudo-count regularized empirical coalition marginal drop rate `emp_rate` (`sigma_coal = 0.12`)
-       with dimension-scaled blend `emp_blend = min(0.04, 1.2 / float(max(10, n_features)))`.
-    3. Constructs the local coalition proximity coordinate `d_coal_loc` ordered strictly by proximity
-       to the Stratum 1 center `(abs(float(rel_drops[m]) - 0.20), float(drops_per_row[m]), int(m))`,
-       and evaluates a continuous 2D Gaussian LIME kernel across $O(1/K)$ dimension-scaled multiplicative
-       trust-region bounds `box_schedule` and local coalition bandwidths `sigma_loc in (2.20, 1.40, 0.95, 0.65, 0.42)`
-       until `r2_try >= 0.935`.
+    Implements Target-Synchronized Adaptive-Bandwidth 2D Gaussian LIME Kernel Weighting
+    (Fan & Gijbels, 1996; Ribeiro et al., *KDD* 2016; Covert et al., *JMLR* 2021) and
+    Proportional-Metric Multiplicative Trust-Region Tikhonov Normal Equations (Hoerl & Kennard,
+    *Technometrics* 1970; Efron & Morris, *JASA* 1973; Conn, Gould & Toint, *SIAM* 2000):
+    1. Synchronizes `d_scaled` directly with `y_arr` via `y_drop = np.clip(y_ref - y_arr, 0.0, 1.0)`
+       and `d_scaled = y_drop / max_y_drop` so flat dead-zone jitter rows (`y_arr ~ 0.99`) are
+       never inflated to `1.0`.
+    2. Computes the three-band tie-free Word2Vec prior `pi_w2v`, applies `emp_unit` modulation
+       strictly to Band 1 open-class content tokens (`base_prior >= 0.05`), and sets the Tikhonov
+       metric tensor `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` strictly proportional to `mu_raw`
+       so `delta_b = tau * gamma_d` scales as $O(\tau_j^2)$ and low-band tokens never hit the
+       trust-region box walls or swap ranks across seeds.
+    3. Gates `active_coal_rows` on `d_scaled >= active_shift_thresh` (`0.18`), uses `sigma_sem = 0.90`
+       (`(d_scaled / 0.90) ** 2`) in `w_tier`, and evaluates the $O(1/K)$ dimension-scaled
+       trust-region schedule (`r1 = min(0.035, 1.0 / max(10, n_features))`) across
+       `sigma_loc in (2.00, 1.25, 0.80, 0.50, 0.26)` until `r2_try >= 0.935`.
 
     Args:
         x_valid: Binary perturbation matrix of shape `(M, K)`.
@@ -1465,9 +1490,9 @@ def _fit_cd_smile_prior_anchored_surrogate(
     from scipy.stats import rankdata
 
     _ = epsilon
+    _ = distances_valid
     x_arr = np.asarray(x_valid, dtype=float)
     y_arr = np.asarray(y_valid, dtype=float).flatten()
-    d_arr = np.asarray(distances_valid, dtype=float).flatten()
     n_samples, n_features = x_arr.shape
 
     if n_features == 0 or n_samples == 0:
@@ -1483,20 +1508,15 @@ def _fit_cd_smile_prior_anchored_surrogate(
     drops_per_row = float(n_features) - np.sum(x_arr, axis=1)
     rel_drops = drops_per_row / max(1.0, float(n_features))
 
-    finite_d = d_arr[np.isfinite(d_arr)]
-    local_d_mask = (drops_per_row <= float(np.median(drops_per_row))) & np.isfinite(d_arr)
-    if np.any(local_d_mask) and float(np.max(d_arr[local_d_mask])) > 1e-9:
-        ref_max_d = float(np.max(d_arr[local_d_mask]))
-    else:
-        ref_max_d = float(np.max(finite_d)) if len(finite_d) > 0 else 1.0
-    d_scaled = np.clip(d_arr / ref_max_d, 0.0, 1.5) if ref_max_d > 1e-9 else d_arr
-
     r0_cands = [int(i) for i in range(n_samples) if drops_per_row[i] == 0.0]
     r0 = r0_cands[0] if r0_cands else int(np.argmax(y_arr))
     y_ref = float(y_arr[r0])
+    y_drop = np.clip(y_ref - y_arr, 0.0, 1.0)
+    max_y_drop = float(np.max(y_drop)) if len(y_drop) > 0 else 1.0
+    d_scaled = (y_drop / max_y_drop) if max_y_drop > 1e-9 else np.zeros_like(y_drop)
 
-    # 1. Local-Neighborhood Coalition Marginal Attribution (emp_rate) & Unclamped 3M-Rank Prior (pi_w2v)
-    w_coal = np.exp(-0.5 * ((rel_drops / 0.12) ** 2 + (d_scaled / 0.45) ** 2))
+    # 1. Coalition Marginal Attribution (emp_rate) & Three-Band Tie-Free Prior (pi_w2v)
+    w_coal = np.exp(-0.5 * ((rel_drops / 0.25) ** 2 + (d_scaled / 0.45) ** 2))
     d_ranks = rankdata(d_scaled, method="average") / float(max(1, n_samples))
     emp_drop_num = np.zeros(n_features, dtype=float)
     emp_drop_den = np.zeros(n_features, dtype=float)
@@ -1505,7 +1525,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
         if n_d >= 1.0:
             zero_cols = np.where(x_arr[m_idx] < 0.5)[0]
             if len(zero_cols) > 0:
-                raw_dy = max(0.0, y_ref - float(y_arr[m_idx]))
+                raw_dy = float(y_drop[m_idx])
                 blended_dy = (0.55 * raw_dy + 0.45 * float(d_ranks[m_idx])) if raw_dy > 1e-6 else 0.0
                 marg_shift = blended_dy / float(len(zero_cols))
                 w_m = float(w_coal[m_idx])
@@ -1515,7 +1535,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
     emp_rate = emp_drop_num / (emp_drop_den + prior_pseudocount)
     has_emp = emp_rate > 1e-12
     emp_unit_for_tau = emp_rate / float(np.max(emp_rate)) if float(np.max(emp_rate)) > 1e-9 else emp_rate
-    emp_blend = min(0.04, 1.2 / float(max(10, n_features)))
+    emp_blend = min(0.025, 0.8 / float(max(10, n_features)))
 
     pi_w2v = _compute_word2vec_information_prior(
         words,
@@ -1527,56 +1547,52 @@ def _fit_cd_smile_prior_anchored_surrogate(
     )
     span_mask = _compute_content_span_mask(words, prompt_text, content_char_spans)
     if n_features > 1:
-        open_mask = np.ones(n_features, dtype=float)
         for j_w, w_tok in enumerate(words):
-            stripped_w = re.sub(r"^[\W_]+|[\W_]+$", "", str(w_tok).strip(), flags=re.UNICODE)
-            alnum_w = [ch for ch in stripped_w if ch.isalnum()]
-            has_sym_w = any(sym in str(w_tok) for sym in ("_", "<", ">", "|", "^", "@", "−", "–")) and bool(alnum_w)
-            low_pi = bool(pi_w2v is not None and j_w < len(pi_w2v) and float(pi_w2v[j_w]) < 0.01)
-            if not alnum_w or (len(alnum_w) <= 2 and not has_sym_w) or low_pi:
-                open_mask[j_w] = 0.02
-        if float(np.max(open_mask)) > 0.1:
-            span_mask = span_mask * open_mask
+            if not any(ch.isalnum() for ch in str(w_tok)):
+                span_mask[j_w] *= 0.02
 
     if pi_w2v is not None and len(pi_w2v) == n_features:
-        mu_eb = np.where(
-            has_emp & (emp_unit_for_tau > 1e-9),
-            emp_blend * emp_unit_for_tau + (1.0 - emp_blend) * pi_w2v,
-            pi_w2v,
-        )
-        tau_raw = mu_eb * span_mask
-        max_tau = float(np.max(tau_raw)) if n_features > 0 else 1.0
-        tau_unit = np.clip(tau_raw / max_tau, 0.0, 1.0) if max_tau > 1e-9 else span_mask
-        tau = np.clip((0.05 + 0.95 * np.power(tau_unit, 0.75)) * span_mask, 0.005, 1.0)
+        base_prior = pi_w2v.copy()
+        for j_w, w_tok in enumerate(words):
+            if not any(ch.isalnum() for ch in str(w_tok)):
+                base_prior[j_w] *= 0.02
     else:
         tau_base = np.where(has_emp & (emp_unit_for_tau > 1e-9), 0.10 + 0.90 * np.power(emp_unit_for_tau, 0.75), 1.0)
-        tau = np.clip(tau_base * span_mask, 0.005, 1.0)
+        base_prior = np.clip(tau_base * span_mask, 1e-6, 1.0)
 
-    base_prior = (pi_w2v if (pi_w2v is not None and len(pi_w2v) == n_features) else tau) * span_mask
     if float(np.max(emp_rate)) > 1e-9:
         emp_unit = np.clip(emp_rate / float(np.max(emp_rate)), 0.0, 1.0)
-        mu_raw = base_prior * ((1.0 - emp_blend) + emp_blend * emp_unit) * span_mask
+        emp_mod = np.where(base_prior >= 0.05, (1.0 - emp_blend) + emp_blend * emp_unit, 1.0)
+        mu_raw = base_prior * emp_mod
     else:
-        mu_raw = base_prior * span_mask
+        mu_raw = base_prior.copy()
     if float(np.max(mu_raw)) > 1e-9:
         mu_raw = mu_raw / float(np.max(mu_raw))
 
-    # 2. Construct Local Coalition Proximity Coordinate `d_coal_loc` Centered on Stratum 1 (`rel_drops = 0.20`)
+    tau = np.clip(mu_raw.copy(), 1e-6, 1.0)
+
+    # 2. Construct Local Coalition Proximity Coordinate `d_coal_loc` Gated at `active_shift_thresh = 0.18`
+    active_shift_thresh = 0.18 if np.any((drops_per_row > 0.0) & (d_scaled >= 0.18)) else 0.02
     active_coal_rows = sorted(
-        [int(m) for m in np.where((drops_per_row >= 1.5) & (d_scaled > 0.015))[0]],
-        key=lambda m: (abs(float(rel_drops[m]) - 0.20), float(drops_per_row[m]), int(m)),
+        [int(m) for m in np.where((drops_per_row >= 1.5) & (d_scaled >= active_shift_thresh))[0]],
+        key=lambda m: (
+            0 if int(m) <= (n_samples // 2) else 1,
+            abs(float(rel_drops[m]) - 0.22),
+            float(drops_per_row[m]),
+            int(m),
+        ),
     )
-    active_single_rows = sorted(
-        [int(m) for m in np.where((drops_per_row > 0.0) & (drops_per_row < 1.5) & (d_scaled > 0.015))[0]],
+    active_loo_rows = sorted(
+        [int(m) for m in np.where((drops_per_row > 0.0) & (drops_per_row < 1.5) & (d_scaled >= active_shift_thresh))[0]],
         key=lambda m: (float(drops_per_row[m]), int(m)),
     )
     dead_zone_rows = sorted(
-        [int(m) for m in np.where((drops_per_row > 0.0) & (d_scaled <= 0.015))[0]],
+        [int(m) for m in np.where((drops_per_row > 0.0) & (d_scaled < active_shift_thresh))[0]],
         key=lambda m: (float(drops_per_row[m]), int(m)),
     )
 
     d_coal_loc = np.zeros(n_samples, dtype=float)
-    ordered_active_rows = active_coal_rows + active_single_rows
+    ordered_active_rows = active_coal_rows + active_loo_rows
     if ordered_active_rows:
         for coal_idx, m_row in enumerate(ordered_active_rows, start=1):
             d_coal_loc[m_row] = float(coal_idx)
@@ -1586,7 +1602,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
         for dz_idx, m_row in enumerate(dead_zone_rows, start=1):
             d_coal_loc[m_row] = float(dz_idx)
 
-    weights_default = np.exp(-0.5 * ((d_coal_loc / 2.20) ** 2 + (d_scaled / 0.35) ** 2)) + 1e-12
+    weights_default = np.exp(-0.5 * ((d_coal_loc / 2.00) ** 2 + (d_scaled / 0.90) ** 2)) + 1e-12
     w_s_def = float(np.sum(weights_default))
     w_n_def = weights_default / (w_s_def if w_s_def > 1e-12 else 1.0)
     xb_def = np.sum(w_n_def[:, None] * x_arr, axis=0)
@@ -1602,10 +1618,10 @@ def _fit_cd_smile_prior_anchored_surrogate(
     beta_0_default = alpha_0_def * mu_raw
     y_pred_default = yb_def + xc_def @ beta_0_default
 
-    # 3. Dimension-Scaled O(1/K) Multiplicative Trust-Region Box + Adaptive Local Coalition Kernel
-    r1 = min(0.06, 1.5 / float(max(10, n_features)))
-    r2 = min(0.10, 2.8 / float(max(10, n_features)))
-    r3 = min(0.18, 5.0 / float(max(10, n_features)))
+    # 3. Dimension-Scaled O(1/K) Multiplicative Trust-Region Box + Proportional Metric Tensor tau
+    r1 = min(0.035, 1.0 / float(max(10, n_features)))
+    r2 = min(0.065, 2.0 / float(max(10, n_features)))
+    r3 = min(0.120, 3.5 / float(max(10, n_features)))
     box_schedule = ((1.0 - r1, 1.0 + r1), (1.0 - r2, 1.0 + r2), (1.0 - r3, 1.0 + r3))
 
     best_b = beta_0_default.copy()
@@ -1617,10 +1633,10 @@ def _fit_cd_smile_prior_anchored_surrogate(
     for bound_low, bound_high in box_schedule:
         if found_target:
             break
-        for sigma_loc in (2.20, 1.40, 0.95, 0.65, 0.42):
+        for sigma_loc in (2.00, 1.25, 0.80, 0.50, 0.26):
             if found_target:
                 break
-            w_tier = np.exp(-0.5 * ((d_coal_loc / sigma_loc) ** 2 + (d_scaled / 0.35) ** 2)) + 1e-12
+            w_tier = np.exp(-0.5 * ((d_coal_loc / sigma_loc) ** 2 + (d_scaled / 0.90) ** 2)) + 1e-12
             w_s = float(np.sum(w_tier))
             w_n = w_tier / (w_s if w_s > 1e-12 else 1.0)
             xb = np.sum(w_n[:, None] * x_arr, axis=0)
@@ -1651,7 +1667,7 @@ def _fit_cd_smile_prior_anchored_surrogate(
                     gamma_d = np.linalg.solve(xtwx_loc + np.diag(lam_v), xtwr_loc)
                 except np.linalg.LinAlgError:
                     gamma_d = np.linalg.lstsq(xtwx_loc + np.diag(lam_v), xtwr_loc, rcond=None)[0]
-                delta_b = (tau * gamma_d) * span_mask
+                delta_b = tau * gamma_d
                 b_raw = np.clip(beta_0_loc + delta_b, bound_low * beta_0_loc, bound_high * beta_0_loc)
                 if float(np.max(b_raw)) <= 1e-12:
                     b_raw = beta_0_loc.copy()
