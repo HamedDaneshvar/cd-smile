@@ -647,11 +647,19 @@ def compute_genuine_semantic_distance(
         strict_prompt=strict_prompt_lookup,
     )
     prob_dist = _compute_logprob_distribution_distance(orig_lp, pert_lp)
+    # v4.6.0: one blend for every row. Previously identical responses returned `prob_dist` at full
+    # weight while any textual change (even formatting) scaled it by 0.35, so a reformatted answer
+    # could score closer to the original than an identical one; `prob_dist > 0` also doubled as the
+    # availability test, so an exact 0.0 switched formulas. Availability is now explicit.
+    has_prob = bool(orig_lp) and bool(pert_lp)
+
+    def _blend_with_prob(text_d: float) -> float:
+        return float(0.65 * text_d + 0.35 * prob_dist) if has_prob else float(text_d)
 
     orig_str = _expand_short_mc_output_with_prompt_option(original_output, prompt_context)
     pert_str = _expand_short_mc_output_with_prompt_option(perturbed_output, prompt_context)
     if orig_str == pert_str:
-        return float(prob_dist)
+        return _blend_with_prob(0.0)
     if not orig_str or not pert_str:
         return 1.0
 
@@ -666,7 +674,7 @@ def compute_genuine_semantic_distance(
 
     def _finalize_distance(full_d: float) -> float:
         text_d = float(0.55 * full_d + 0.45 * diff_dist) if diff_dist is not None else float(full_d)
-        return float(0.65 * text_d + 0.35 * prob_dist) if prob_dist > 0.0 else float(text_d)
+        return _blend_with_prob(text_d)
 
     # 1. Prefer native LLMExplainer.calculate_distance when available
     if explainer is not None and hasattr(explainer, "calculate_distance") and callable(explainer.calculate_distance):
