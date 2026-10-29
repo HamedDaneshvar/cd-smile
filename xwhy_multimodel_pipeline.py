@@ -517,10 +517,11 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-# v4.6.0: a new explainer means results from any earlier version (including the rejected v4.5.6)
-# must never be resumed from disk, so only checkpoints written by v4.6.0 are accepted.
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.6.0"
-_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.0"}
+# A new explainer means results from any earlier version (including the rejected v4.5.6) must never
+# be resumed from disk. v4.6.1 changed the output distance and the long-scope design, so only
+# checkpoints written by v4.6.1 are accepted.
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.6.1"
+_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.1"}
 
 
 def compute_experiment_fingerprint(

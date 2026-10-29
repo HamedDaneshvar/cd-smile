@@ -88,8 +88,9 @@ EPSILON: Final[float] = 1e-4
 KERNEL_WIDTH: Final[float] = 0.5
 RIDGE_ALPHA: Final[float] = 0.001
 NORMALIZATION_METHOD: Final[Literal["linear", "inverse"]] = "linear"
-# Perturbation ceiling (v4.6.0): K + 1 <= 384 lets every single-token occlusion enter the design for
-# prompts of up to 383 active words; xwhy_metrics re-runs Stability/Consistency at the baseline's M.
+# Perturbation ceiling (v4.6.0): at M = 384 the complete-stratum share rule enumerates every
+# single-token occlusion for scopes of up to 223 words; longer scopes use the balanced design that
+# deletes every token at least once (v4.6.1). xwhy_metrics re-runs Stability/Consistency at the same M.
 NUM_PERTURBATIONS: Final[int] = 384
 DEFAULT_MAX_PERTURBATIONS: Final[int] = 384
 DEFAULT_FULL_PROMPT_MAX_PERTURBATIONS: Final[int] = 384
@@ -152,6 +153,8 @@ def _snapshot_prompt_logprobs(provider: Any, model_name: str, prompt: str, queri
             setattr(provider, "_xwhy_logprob_snapshots", store)
         except Exception:
             return
+    # Re-inserting moves a refreshed prompt to the newest end, so eviction is least-recently-written.
+    store.pop((model_name, prompt), None)
     if len(store) >= _LOGPROB_SNAPSHOT_CAPACITY:
         for old_key in list(store.keys())[: len(store) - _LOGPROB_SNAPSHOT_RETAIN]:
             store.pop(old_key, None)
@@ -755,7 +758,8 @@ def compute_genuine_semantic_distance(
 # ============================================================================
 
 _CRN_DENOMINATOR: Final[float] = float(2**64)
-_SURROGATE_METHOD_NAME: Final[str] = "cd_smile_occlusion_eb"
+_OCCLUSION_EB_METHOD_NAME: Final[str] = "cd_smile_occlusion_eb"
+_GCV_RIDGE_METHOD_NAME: Final[str] = "cd_smile_gcv_ridge"
 
 
 def _crn_uniform(seed: int, counter: int, key: str) -> float:
@@ -782,16 +786,18 @@ def _crn_uniform(seed: int, counter: int, key: str) -> float:
     return (int.from_bytes(digest, "big") + 0.5) / _CRN_DENOMINATOR
 
 
-def _log_deletion_stratum_masses(num_words: int) -> Any:
+def _log_deletion_stratum_masses(num_words: int, drop_rate: float | None = None) -> Any:
     r"""Return the log probability mass of each deletion-count stratum under `mu_q`.
 
-    With drop rate $q = 1 / (K + 1)$, the number of deleted tokens is
-    $k \sim \mathrm{Binomial}(K, q)$, so
-    $\log m_k = \log\binom{K}{k} + k \log q + (K - k)\log(1 - q)$. The choice of $q$
-    is the unique rate with $m_0 = m_1$, i.e. $(1 - q)^K = Kq(1 - q)^{K - 1}$.
+    With drop rate $q$, the number of deleted tokens is $k \sim \mathrm{Binomial}(K, q)$, so
+    $\log m_k = \log\binom{K}{k} + k \log q + (K - k)\log(1 - q)$. The default
+    $q = 1 / (K + 1)$ is the unique rate with $m_0 = m_1$, i.e.
+    $(1 - q)^K = Kq(1 - q)^{K - 1}$; `_deletion_rate` raises it only for scopes too long
+    for the budget to delete every token once.
 
     Args:
         num_words: Number of active features K (`>= 1`).
+        drop_rate: Drop rate q; defaults to `1 / (K + 1)`.
 
     Returns:
         np.ndarray: Vector of length `K + 1` with `log m_k` for `k = 0..K`.
@@ -800,10 +806,92 @@ def _log_deletion_stratum_masses(num_words: int) -> Any:
     from scipy.special import gammaln
 
     k_total = int(num_words)
-    q_drop = 1.0 / float(k_total + 1)
+    q_drop = float(drop_rate) if drop_rate is not None else 1.0 / float(k_total + 1)
     k_vals = np.arange(k_total + 1, dtype=float)
     log_comb = gammaln(k_total + 1.0) - gammaln(k_vals + 1.0) - gammaln(k_total - k_vals + 1.0)
     return log_comb + k_vals * math.log(q_drop) + (k_total - k_vals) * math.log1p(-q_drop)
+
+
+def _proportional_allocation(rows: int, log_mass: Any, strata: list[int], num_words: int) -> dict[int, int]:
+    """Allocate `rows` design rows to `strata` in proportion to their `mu_q` mass (`v4.6.1`).
+
+    Proportional allocation with largest-remainder rounding (Cochran, *Sampling Techniques*,
+    1977, Sec. 5.5); a stratum is capped at its size $\\binom{K}{k}$ and the excess is
+    re-allocated over the uncapped strata. Depends on the mask geometry only.
+
+    Args:
+        rows: Number of rows to allocate.
+        log_mass: `log m_k` for `k = 0..K` (`_log_deletion_stratum_masses`).
+        strata: Deletion counts eligible for allocation.
+        num_words: Number of active features K.
+
+    Returns:
+        dict[int, int]: Rows per deletion count (every key of `strata` present).
+    """
+    import numpy as np
+
+    alloc = {k_drop: 0 for k_drop in strata}
+    remaining = int(rows)
+    active = list(strata)
+    while remaining > 0 and active:
+        rel = np.exp(np.asarray([log_mass[k_drop] for k_drop in active]) - max(log_mass[k_drop] for k_drop in active))
+        quotas = remaining * rel / float(np.sum(rel))
+        base = np.floor(quotas).astype(int)
+        order = np.argsort(-(quotas - base), kind="stable")
+        base[order[: remaining - int(np.sum(base))]] += 1
+        capped = False
+        for k_drop, n_rows in zip(list(active), base):
+            if n_rows <= 0:
+                continue
+            room = math.comb(num_words, k_drop) - alloc[k_drop]
+            alloc[k_drop] += int(min(n_rows, room))
+            if n_rows >= room:
+                active.remove(k_drop)
+                capped = capped or n_rows > room
+        remaining = int(rows) - sum(alloc.values())
+        if not capped:
+            break
+    return alloc
+
+
+def _deletion_rate(num_words: int, design_size: int) -> float:
+    """Return the drop rate q of `mu_q` for a K-token scope and an M-row design (`v4.6.1`).
+
+    `q = 1 / (K + 1)` unless the `M - 1` non-baseline rows, proportionally allocated, would
+    delete fewer than K tokens in total: then no design could delete every token once, so q
+    is raised to the smallest rate (bisection) whose allocation deletes at least K tokens.
+    With `M = 384` this happens only for K above ~600. Depends on K and M only.
+
+    Args:
+        num_words: Number of active features K.
+        design_size: Number of design rows M (baseline included).
+
+    Returns:
+        float: Drop rate in `(0, 0.5]`.
+    """
+    k_total = int(num_words)
+    base_rate = 1.0 / float(k_total + 1)
+    rows = int(design_size) - 1
+    if k_total <= 1 or rows >= k_total or rows <= 0:
+        return base_rate
+    strata = list(range(1, k_total))
+
+    def _deletions(rate: float) -> int:
+        alloc = _proportional_allocation(rows, _log_deletion_stratum_masses(k_total, rate), strata, k_total)
+        return sum(k_drop * n_rows for k_drop, n_rows in alloc.items())
+
+    if _deletions(base_rate) >= k_total:
+        return base_rate
+    low, high = base_rate, 0.5
+    if _deletions(high) < k_total:
+        return high
+    for _ in range(40):
+        mid = 0.5 * (low + high)
+        if _deletions(mid) >= k_total:
+            high = mid
+        else:
+            low = mid
+    return high
 
 
 def _token_identity_keys(num_words: int, words: list[str] | None) -> list[str]:
@@ -882,6 +970,71 @@ def _delete_tokens_preserving_layout(text: str, mask: Any) -> str:
     return "".join(parts)
 
 
+def _balanced_coverage_rows(
+    masks: list[tuple[int, ...]],
+    seen: set[tuple[int, ...]],
+    open_strata: list[int],
+    log_mass: Any,
+    budget: int,
+    seed: int,
+    token_keys: list[str],
+) -> list[tuple[int, ...]]:
+    """Fill the rest of a long-scope design with permutation-stream blocks (`v4.6.1`).
+
+    Rows are allocated to `open_strata` in proportion to their mass and filled in increasing
+    deletion count. Each row deletes the next `k` distinct tokens of a stream built from
+    identity-keyed random permutations (`_crn_uniform(seed, round, "perm|" + key)`); a token
+    already in the row is left at the head of the stream for the next row. Every token is
+    therefore deleted once before any token is deleted twice, and inserting a token leaves
+    the relative order of all other tokens unchanged (common random numbers). Duplicate rows
+    are rejected and redrawn in the same stratum.
+
+    Args:
+        masks: Design rows so far (baseline first); extended in place.
+        seen: Set of the rows in `masks`; extended in place.
+        open_strata: Deletion counts not enumerated (starting at `1`).
+        log_mass: `log m_k` for `k = 0..K`.
+        budget: Total number of design rows M.
+        seed: Run seed.
+        token_keys: Identity key of every feature (`_token_identity_keys`).
+
+    Returns:
+        list[tuple[int, ...]]: `masks`, filled up to `budget` rows.
+    """
+    import numpy as np
+
+    k_total = len(token_keys)
+    alloc = _proportional_allocation(budget - len(masks), log_mass, open_strata, k_total)
+    stream: list[int] = []
+    perm_round = 0
+    attempts = 64 * budget
+    for k_drop in sorted(alloc):
+        filled = 0
+        while filled < alloc[k_drop] and attempts > 0:
+            attempts -= 1
+            block: list[int] = []
+            while len(block) < k_drop:
+                in_block = set(block)
+                avail = [tok for tok in stream if tok not in in_block]
+                if not avail:
+                    queued = set(stream)
+                    scores = [_crn_uniform(seed, perm_round, f"perm|{key}") for key in token_keys]
+                    stream += [int(tok) for tok in np.argsort(scores, kind="stable") if int(tok) not in queued]
+                    perm_round += 1
+                    continue
+                take = avail[: k_drop - len(block)]
+                block.extend(take)
+                taken = set(take)
+                stream = [tok for tok in stream if tok not in taken]
+            mask = _mask_without(k_total, block)
+            if mask in seen:
+                continue
+            masks.append(mask)
+            seen.add(mask)
+            filled += 1
+    return masks
+
+
 def generate_structured_perturbation_masks(
     num_words: int,
     num_perturbations: int,
@@ -907,11 +1060,21 @@ def generate_structured_perturbation_masks(
        guard: when the design is at most one token larger than an exhaustive one
        ($K + 1 \le M$ and $2^K \le 2M$, e.g. a Stability variant of an exhaustive scope),
        the single-deletion stratum is always complete so every token is deleted at least once.
-    3. The remaining rows are drawn stratum-by-stratum with probability proportional to
-       the stratum mass $m_k$; within a stratum the $k$ tokens with the smallest
-       counter-based uniforms `_crn_uniform(seed, counter, key_j)` are deleted, so the
-       draw of every existing token is unchanged when a token is inserted. Duplicate
-       masks are rejected and exhausted strata are closed, so no row is ever repeated.
+    3. If the single-deletion stratum was enumerated, the remaining rows are drawn
+       stratum-by-stratum with probability proportional to the stratum mass $m_k$; within a
+       stratum the $k$ tokens with the smallest counter-based uniforms
+       `_crn_uniform(seed, counter, key_j)` are deleted, so the draw of every existing token
+       is unchanged when a token is inserted. Duplicate masks are rejected and exhausted
+       strata are closed, so no row is ever repeated.
+    4. Otherwise (long scopes, `v4.6.1`) independent sampling would leave some tokens never
+       deleted, with a constant column and a zero coefficient. The remaining rows are then
+       allocated to strata in proportion to $m_k$ (`_proportional_allocation`) and filled,
+       in increasing $k$, with consecutive blocks of a stream of identity-keyed random token
+       permutations, so no token is deleted twice before every token is deleted once
+       (permutation sampling, Castro, Gómez & Tejada, *Comput. Oper. Res.* 2009; Mitchell et
+       al., *JMLR* 2022). The procedure is equivariant under relabelling the tokens, so each
+       row is still a uniformly random $k$-subset and the post-stratified weights are
+       unchanged. `_deletion_rate` guarantees the allocation deletes at least K tokens.
 
     The all-deleted mask ($k = K$, an empty prompt) is only produced by step 1.
 
@@ -920,7 +1083,7 @@ def generate_structured_perturbation_masks(
         num_perturbations: Perturbation budget M (number of masks requested).
         seed: Seed of the stochastic strata (step 3); steps 1-2 are seed-free.
         keep_probability: Accepted for interface compatibility with `TextPerturbation`;
-            the drop rate is fixed by the design rule $q = 1 / (K + 1)$.
+            the drop rate is fixed by the design rule `_deletion_rate(K, M)`.
         words: Optional feature token strings used for identity-keyed random numbers.
 
     Returns:
@@ -945,7 +1108,7 @@ def generate_structured_perturbation_masks(
 
     masks: list[tuple[int, ...]] = [tuple([1] * k_total)]
     seen: set[tuple[int, ...]] = set(masks)
-    log_mass = _log_deletion_stratum_masses(k_total)
+    log_mass = _log_deletion_stratum_masses(k_total, _deletion_rate(k_total, budget))
     open_strata = list(range(1, k_total))
     # Identifiability guard: a design at most one token larger than an exhaustive one (2^K <= 2M)
     # cannot rely on sampling to delete every token, so its single-deletion stratum is always complete.
@@ -965,8 +1128,11 @@ def generate_structured_perturbation_masks(
             seen.add(mask)
         open_strata.pop(0)
 
-    # Stochastic strata: stratum ~ m_k, tokens via identity-keyed common random numbers.
     token_keys = _token_identity_keys(k_total, words)
+    if open_strata and open_strata[0] == 1:
+        return _balanced_coverage_rows(masks, seen, open_strata, log_mass, budget, seed, token_keys)
+
+    # Stochastic strata: stratum ~ m_k, tokens via identity-keyed common random numbers.
     used = {k_drop: 0 for k_drop in open_strata}
     max_draws = 64 * budget
     counter = 0
@@ -1009,7 +1175,7 @@ class _PostStrata:
     drops: Any
 
 
-def _post_strata(x_arr: Any) -> _PostStrata:
+def _post_strata(x_arr: Any, design_size: int | None = None) -> _PostStrata:
     """Group the design rows into post-strata for kernel weights and design-based variances.
 
     Completely enumerated deletion strata ($n_k = \\binom{K}{k}$) are their own post-strata.
@@ -1022,6 +1188,8 @@ def _post_strata(x_arr: Any) -> _PostStrata:
 
     Args:
         x_arr: Binary design matrix of shape `(M, K)`.
+        design_size: Rows of the generated design (fixes the drop rate, `_deletion_rate`);
+            defaults to `M`. Pass it when rows with an invalid distance were removed.
 
     Returns:
         _PostStrata: Row labels and per-post-stratum mass, population, and row counts.
@@ -1030,7 +1198,8 @@ def _post_strata(x_arr: Any) -> _PostStrata:
 
     k_total = x_arr.shape[1]
     drops = np.rint(k_total - np.sum(x_arr, axis=1)).astype(int)
-    log_mass = _log_deletion_stratum_masses(k_total)
+    rows = int(design_size) if design_size is not None else int(x_arr.shape[0])
+    log_mass = _log_deletion_stratum_masses(k_total, _deletion_rate(k_total, rows))
     stratum_mass = np.exp(log_mass - np.max(log_mass))
     stratum_rows = np.bincount(drops, minlength=k_total + 1)
     group_of = np.full(k_total + 1, -1, dtype=int)
@@ -1285,7 +1454,9 @@ def _heteroscedastic_eb_shrinkage(delta_hat: Any, occlusion: Any, sampling_var: 
 def _gcv_ridge_coefficients(xc: Any, yc: Any, weights: Any) -> Any:
     r"""Solve the weighted ridge problem with the penalty chosen by generalised cross-validation.
 
-    Used only when the design cannot contain every single-token occlusion ($K + 1 > M$).
+    Used only when the design does not contain every single-token occlusion, i.e. when the
+    occlusion stratum fails its complete-stratum share (`K >= 224` at `M = 384`). The
+    balanced long-scope design deletes every token at least once, so no column is constant.
     With $\tilde{X} = W^{1/2} X_c = U S V^\top$, the ridge solution is
     $\beta(\lambda) = V\,\mathrm{diag}(s_i / (s_i^2 + \lambda))\,U^\top \tilde{y}$ and $\lambda$
     minimises $\mathrm{GCV}(\lambda) = n\,\|\tilde{y} - H_\lambda \tilde{y}\|^2 /
@@ -1325,7 +1496,27 @@ def _gcv_ridge_coefficients(xc: Any, yc: Any, weights: Any) -> Any:
     return best[1]
 
 
-def _fit_cd_smile_occlusion_eb_surrogate(x_valid: Any, y_valid: Any) -> tuple[Any, Any, Any]:
+def _surrogate_method_name(x_arr: Any) -> str:
+    """Name the estimator `_fit_cd_smile_occlusion_eb_surrogate` applies to the design `x_arr`.
+
+    Args:
+        x_arr: Binary design matrix of shape `(M, K)`.
+
+    Returns:
+        str: `_OCCLUSION_EB_METHOD_NAME` when every single-token occlusion is in the design,
+            else `_GCV_RIDGE_METHOD_NAME`.
+    """
+    import numpy as np
+
+    complete = _exact_occlusion_effects(x_arr, np.zeros(x_arr.shape[0], dtype=float)) is not None
+    return _OCCLUSION_EB_METHOD_NAME if complete else _GCV_RIDGE_METHOD_NAME
+
+
+def _fit_cd_smile_occlusion_eb_surrogate(
+    x_valid: Any,
+    y_valid: Any,
+    design_size: int | None = None,
+) -> tuple[Any, Any, Any]:
     r"""Fit the CD-SMILE local linear surrogate on every perturbation row (`v4.6.0`).
 
     1. Kernel: mask-only post-stratified weights (`_stratified_kernel_weights`).
@@ -1351,6 +1542,8 @@ def _fit_cd_smile_occlusion_eb_surrogate(x_valid: Any, y_valid: Any) -> tuple[An
     Args:
         x_valid: Binary perturbation matrix of shape `(M, K)`.
         y_valid: Min-max similarity targets of shape `(M,)` (1 at the baseline).
+        design_size: Rows of the generated design, when rows with an invalid distance were
+            removed from `x_valid` (fixes the kernel's drop rate); defaults to `M`.
 
     Returns:
         tuple[np.ndarray, np.ndarray, np.ndarray]: `(coefficients, y_pred, weights)`.
@@ -1363,7 +1556,7 @@ def _fit_cd_smile_occlusion_eb_surrogate(x_valid: Any, y_valid: Any) -> tuple[An
     if k_total == 0 or n_rows == 0:
         return np.zeros(k_total, dtype=float), y_arr.copy(), np.full(n_rows, 1.0 / max(1, n_rows))
 
-    strata = _post_strata(x_arr)
+    strata = _post_strata(x_arr, design_size)
     weights = _stratified_kernel_weights(x_arr, strata)
     if float(np.ptp(y_arr)) <= 1e-12:
         return np.zeros(k_total, dtype=float), np.full(n_rows, float(np.mean(y_arr))), weights
@@ -1436,6 +1629,7 @@ class _PerturbationFit:
         y_pred: Surrogate predictions of the valid rows.
         weights: Kernel weights of the valid rows.
         constant_response: True when every valid distance is identical.
+        method: Estimator applied (`_surrogate_method_name`).
     """
 
     outputs: list[str]
@@ -1447,6 +1641,7 @@ class _PerturbationFit:
     y_pred: Any
     weights: Any
     constant_response: bool
+    method: str
 
     @property
     def kernel_effective_sample_size(self) -> float:
@@ -1566,7 +1761,7 @@ def _query_and_fit_perturbations(
     x_arr = np.vstack([np.asarray(masks[i], dtype=float) for i in valid_idx])
     constant_response = bool(float(np.ptp(distances[valid_idx])) <= 1e-9)
 
-    coefficients, y_pred, weights = _fit_cd_smile_occlusion_eb_surrogate(x_arr, y_target)
+    coefficients, y_pred, weights = _fit_cd_smile_occlusion_eb_surrogate(x_arr, y_target, design_size=len(masks))
     if constant_response:
         coefficients = np.zeros_like(coefficients)
         y_pred = np.full(len(y_target), float(np.mean(y_target)) if len(y_target) > 0 else 1.0)
@@ -1586,6 +1781,7 @@ def _query_and_fit_perturbations(
         y_pred=y_pred,
         weights=weights,
         constant_response=constant_response,
+        method=_surrogate_method_name(x_arr),
     )
 
 
@@ -1937,7 +2133,7 @@ def apply_xwhy_smile_enhancements() -> None:
                 "kernel_effective_sample_size": fit.kernel_effective_sample_size,
                 "y_target": fit.y_target,
                 "y_pred": fit.y_pred,
-                "best_surrogate_method": _SURROGATE_METHOD_NAME,
+                "best_surrogate_method": fit.method,
                 "constant_response": fit.constant_response,
                 "status": fit.status,
             }
@@ -3738,7 +3934,7 @@ def direct_scoped_explain(
         metrics={
             "weighted_r2": r2_score,
             "r2": r2_score,
-            "best_surrogate": _SURROGATE_METHOD_NAME,
+            "best_surrogate": fit.method,
             "kernel_effective_sample_size": fit.kernel_effective_sample_size,
             "constant_response": fit.constant_response,
             "status": fit.status,

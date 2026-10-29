@@ -728,6 +728,25 @@ def evaluate_explanation_stability(
     dists: list[float] = []
     details: list[dict[str, Any]] = []
 
+    full_words = prompt_text.split()
+    base_indices: list[int] = []
+    if resolved_mode == PerturbationMode.IMPORTANCE_WORDS:
+        # v4.6.1: locate the importance words once; every variation depends on the same positions,
+        # so a failure is reported as a missing Stability score, never as a mean over fewer variations.
+        imp_tokens = list(importance_tokens or [])
+        try:
+            if not imp_tokens:
+                base_indices = list(range(len(full_words)))
+            elif importance_indices and len(importance_indices) == len(imp_tokens):
+                base_indices = [int(i) for i in importance_indices]
+            else:
+                base_indices = locate_tokens_in_prompt(imp_tokens, prompt_text)
+            if any(i < 0 or i >= len(full_words) for i in base_indices):
+                raise IndexError(f"importance index outside the {len(full_words)}-word prompt")
+        except (ValueError, IndexError) as exc:
+            LOGGER.warning("Stability not evaluated: importance words not located in the prompt (%s).", exc)
+            return None, None, []
+
     LOGGER.debug(
         "Beginning Stability Evaluation (mode=%s, target_len=%d chars)",
         resolved_mode.value,
@@ -744,23 +763,11 @@ def evaluate_explanation_stability(
             # v4.6.0 fix: perturb the importance words at their real positions in the variant prompt
             # (plus the injected token), never at prompt positions 0..n-1, and keep the prompt layout.
             var_spans = spans
-            full_words = prompt_text.split()
-            imp_tokens = list(importance_tokens or [])
-            try:
-                if not imp_tokens:
-                    base_indices = list(range(len(full_words)))
-                elif importance_indices and len(importance_indices) == len(imp_tokens):
-                    base_indices = [int(i) for i in importance_indices]
-                else:
-                    base_indices = locate_tokens_in_prompt(imp_tokens, prompt_text)
-                insert_at = 0 if pos == "start" else (len(full_words) if pos == "end" else len(full_words) // 2)
-                var_prompt = _inject_token_preserving_layout(prompt_text, insert_at, injected_word)
-                var_words = var_prompt.split()
-                var_imp_indices = sorted([i + (1 if i >= insert_at else 0) for i in base_indices] + [insert_at])
-                var_imp_tokens = [var_words[i] for i in var_imp_indices]
-            except (ValueError, IndexError) as exc:
-                LOGGER.warning("Stability variation '%s' skipped: importance words not located (%s).", var_id, exc)
-                continue
+            insert_at = 0 if pos == "start" else (len(full_words) if pos == "end" else len(full_words) // 2)
+            var_prompt = _inject_token_preserving_layout(prompt_text, insert_at, injected_word)
+            var_words = var_prompt.split()
+            var_imp_indices = sorted([i + (1 if i >= insert_at else 0) for i in base_indices] + [insert_at])
+            var_imp_tokens = [var_words[i] for i in var_imp_indices]
         else:
             orig_words_all = prompt_text.split()
             orig_w_spans = _compute_word_char_spans(prompt_text, orig_words_all)
