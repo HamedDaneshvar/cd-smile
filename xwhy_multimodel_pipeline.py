@@ -217,10 +217,8 @@ try:
         _char_ngram_js_distance,
         _compact_word2vec_keyed_vectors_in_place,
         _compute_contrastive_diff_distance,
-        _compute_word2vec_information_prior,
         _expand_short_mc_output_with_prompt_option,
         _extract_underlying_wv_model,
-        _fit_cd_smile_prior_anchored_surrogate,
         _lookup_prompt_logprobs,
         _purge_gensim_disk_cache_after_load,
         _safe_explainer_call,
@@ -420,10 +418,8 @@ except ImportError:
         _char_ngram_js_distance,
         _compact_word2vec_keyed_vectors_in_place,
         _compute_contrastive_diff_distance,
-        _compute_word2vec_information_prior,
         _expand_short_mc_output_with_prompt_option,
         _extract_underlying_wv_model,
-        _fit_cd_smile_prior_anchored_surrogate,
         _lookup_prompt_logprobs,
         _purge_gensim_disk_cache_after_load,
         _safe_explainer_call,
@@ -521,8 +517,10 @@ class SampleArtifact:
 
 CombinedSampleArtifact = SampleArtifact
 
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.4.1"
-_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.3.7", "4.3.8", "4.3.9", "4.4.0", "4.4.1"}
+# v4.6.0: a new explainer means results from any earlier version (including the rejected v4.5.6)
+# must never be resumed from disk, so only checkpoints written by v4.6.0 are accepted.
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.6.0"
+_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.0"}
 
 
 def compute_experiment_fingerprint(
@@ -629,8 +627,8 @@ def run_xwhy_on_dataset_samples(
         api_key: Optional provider API key.
         enable_scoped_perturbation: Legacy boolean flag.
         dynamic_perturbations: Whether to dynamically compute perturbation count.
-        max_perturbations: Ceiling for GOAL and IMPORTANCE_WORDS (default: 48).
-        full_prompt_max_perturbations: Ceiling for FULL_PROMPT (default: 48).
+        max_perturbations: Ceiling for GOAL and IMPORTANCE_WORDS (default: 384).
+        full_prompt_max_perturbations: Ceiling for FULL_PROMPT (default: 384).
         visualize_per_sample: Whether to render per-sample visualizations immediately.
         show_plots: Whether to display figures inline.
         model_display_name: Optional explicit `model_cfg.display_name` for checkpoint namespacing.
@@ -1168,8 +1166,8 @@ def run_pipeline(
         ground_truth_file: Optional path to custom JSON file with ground-truth annotations.
         enable_scoped_perturbation: Legacy boolean flag for backward compatibility.
         dynamic_perturbations: Whether to dynamically compute perturbation count.
-        max_perturbations: Ceiling for GOAL and IMPORTANCE_WORDS (default: 48).
-        full_prompt_max_perturbations: Ceiling for FULL_PROMPT (default: 48).
+        max_perturbations: Ceiling for GOAL and IMPORTANCE_WORDS (default: 384).
+        full_prompt_max_perturbations: Ceiling for FULL_PROMPT (default: 384).
 
     Returns:
         dict[str, list[SampleArtifact]]: Map of `{model_display_name}_{dataset}` to evaluated artifacts.
@@ -1464,8 +1462,8 @@ def main() -> None:
         compute_consistency=True,
         compute_ablation_fidelity=True,
         dynamic_perturbations=True,
-        max_perturbations=48,
-        full_prompt_max_perturbations=48,
+        max_perturbations=DEFAULT_MAX_PERTURBATIONS,
+        full_prompt_max_perturbations=DEFAULT_FULL_PROMPT_MAX_PERTURBATIONS,
     )
 
     total_artifacts = sum(len(arts) for arts in results.values())

@@ -55,11 +55,13 @@ try:
         get_or_create_ground_truth,
     )
     from .xwhy_core import (
+        NUM_PERTURBATIONS,
         SEED,
         ScopedXWhyResult,
         TEMPERATURE,
         compute_genuine_semantic_distance,
         explain_instance_with_scoping,
+        locate_tokens_in_prompt,
     )
 except ImportError:
     from xwhy_env import (
@@ -89,11 +91,13 @@ except ImportError:
         get_or_create_ground_truth,
     )
     from xwhy_core import (
+        NUM_PERTURBATIONS,
         SEED,
         ScopedXWhyResult,
         TEMPERATURE,
         compute_genuine_semantic_distance,
         explain_instance_with_scoping,
+        locate_tokens_in_prompt,
     )
 
 
@@ -605,6 +609,31 @@ def inject_text_at_position(
     return str(_native_inject(prompt, position=position, default_index=default_index, inject_text=inject_text))
 
 
+def _inject_token_preserving_layout(text: str, word_index: int, token: str) -> str:
+    """Insert `token` before the `word_index`-th whitespace token of `text` without reflowing it.
+
+    Produces the same token sequence as XWhy's `inject_text_at_position` (which re-joins the
+    prompt with single spaces) while keeping every newline of `text`.
+
+    Args:
+        text: Prompt text.
+        word_index: Index in `text.split()` before which `token` is inserted; `len(text.split())`
+            appends it after the last token.
+        token: Superficial token to inject.
+
+    Returns:
+        str: Prompt with `token` inserted and the original layout preserved.
+    """
+    spans = [(m_tok.start(), m_tok.end()) for m_tok in re.finditer(r"\S+", text)]
+    if not spans:
+        return token
+    if word_index >= len(spans):
+        last_end = spans[-1][1]
+        return f"{text[:last_end]} {token}{text[last_end:]}"
+    start = spans[max(0, word_index)][0]
+    return f"{text[:start]}{token} {text[start:]}"
+
+
 def plot_stability_visualization(
     result_one: Any,
     result_two: Any,
@@ -712,10 +741,26 @@ def evaluate_explanation_stability(
             var_prompt = f"{prefix}{modified_target}{suffix}"
             var_spans = {target_scope: (len(prefix), len(prefix) + len(modified_target))}
         elif resolved_mode == PerturbationMode.IMPORTANCE_WORDS:
-            var_prompt = inject_text_at_position(prompt_text, position=pos, inject_text=injected_word)
+            # v4.6.0 fix: perturb the importance words at their real positions in the variant prompt
+            # (plus the injected token), never at prompt positions 0..n-1, and keep the prompt layout.
             var_spans = spans
-            var_imp_tokens = modified_target.split()
-            var_imp_indices = list(range(len(var_imp_tokens)))
+            full_words = prompt_text.split()
+            imp_tokens = list(importance_tokens or [])
+            try:
+                if not imp_tokens:
+                    base_indices = list(range(len(full_words)))
+                elif importance_indices and len(importance_indices) == len(imp_tokens):
+                    base_indices = [int(i) for i in importance_indices]
+                else:
+                    base_indices = locate_tokens_in_prompt(imp_tokens, prompt_text)
+                insert_at = 0 if pos == "start" else (len(full_words) if pos == "end" else len(full_words) // 2)
+                var_prompt = _inject_token_preserving_layout(prompt_text, insert_at, injected_word)
+                var_words = var_prompt.split()
+                var_imp_indices = sorted([i + (1 if i >= insert_at else 0) for i in base_indices] + [insert_at])
+                var_imp_tokens = [var_words[i] for i in var_imp_indices]
+            except (ValueError, IndexError) as exc:
+                LOGGER.warning("Stability variation '%s' skipped: importance words not located (%s).", var_id, exc)
+                continue
         else:
             orig_words_all = prompt_text.split()
             orig_w_spans = _compute_word_char_spans(prompt_text, orig_words_all)
@@ -771,7 +816,8 @@ def evaluate_explanation_stability(
 
         try:
             orig_perts = getattr(original_result, "num_perturbations", None)
-            stab_perts = min(int(orig_perts or 48), 48)
+            # v4.6.0: re-run at the baseline's own budget M so Run 1 and Run 2 use identical design sizes.
+            stab_perts = int(orig_perts) if orig_perts else NUM_PERTURBATIONS
             var_result = explain_instance_with_scoping(
                 explainer=explainer,
                 prompt_text=var_prompt,
@@ -926,7 +972,8 @@ def evaluate_explanation_consistency(
     resolved_mode = resolve_perturbation_mode(mode, enable_scoped_perturbation)
     try:
         orig_perts = getattr(original_result, "num_perturbations", None)
-        cons_perts = min(int(orig_perts or 48), 48)
+        # v4.6.0: same budget M as the baseline run (no 384-vs-48 sample-size mismatch).
+        cons_perts = int(orig_perts) if orig_perts else NUM_PERTURBATIONS
         base_seed = int(getattr(getattr(explainer, "config", None), "seed", SEED))
         second_seed = base_seed + 1
 

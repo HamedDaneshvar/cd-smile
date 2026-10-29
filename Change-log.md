@@ -1,6 +1,6 @@
-# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.5.6`)
+# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.6.0`)
 
-This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.5.6`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
+This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.6.0`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
 
 ---
 
@@ -26,7 +26,8 @@ This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Ex
 | **`v4.5.3`** | 8-File Modular DAG (`xwhy_core.py` Upgrade) | Restored Multi-Word Coalition + Trust-Region Architecture with 50/50 Stratified Coalitions & `ortho_spec` | Restored Fixed-Period (`PERIOD = 36`) CRN Multi-Scale Coalitions with 50% Anchor / 50% Seed-Stochastic split and fixed `((0.92, 1.08), (0.86, 1.14), (0.78, 1.25))` box. | **Colab 6-Sample Smoke Test (`xwhy_pipeline_v4.5.3.log`):** Passed **6/6** on `Weighted R²` (`0.9470–0.9990`), **6/6** on `Stability` (`0.9278–0.9951`), **6/6** on `Token AUC` (`0.8937–0.9836`), and **3/6** on `Consistency < 0.05` (`0.0102`, `0.0071`, `0.0494`), while the 3 longest prompts ($K > 100$) missed narrowly (`0.0552`, `0.0844`, `0.0913`). Documented in Section 14. |
 | **`v4.5.4`** | 8-File Modular DAG (`xwhy_core.py` Upgrade) | Stratum 1 (`[0.16, 0.25]`) vs. Stratum 2 (`[0.28, 0.44]`), `ref_max_d` & $O(1/K)$ Box | Separated Stratum 1 (`[0.16, 0.25]`) from Stratum 2 (`[0.28, 0.44]`), added `ref_max_d = np.max(d_arr[local_d_mask])`, and scaled `r1 = min(0.06, 1.5 / K)`. | **Passed 6/6 on `hellaswag` & `boolq` (`xwhy_pipeline_v4.5.4.log`) and 9/10 on `piqa`, but Failed 3 Short `mmlu` Prompts (`xwhy_pipeline_v4.5.4_60_samples_incomplete.log`):** `ref_max_d` inflated dead-zone jitter rows (`y_arr ~ 0.99`) on short 26–30 token MMLU prompts and `(d_scaled / 0.35)^2` inverted weights between `d_coal_loc = 1.0` and `2.0`. Documented in Section 15. |
 | **`v4.5.5`** | 8-File Modular DAG (`xwhy_core.py` Upgrade) | Expanded Stratum 1 (`[0.16, 0.38]`), Target-Synchronized `d_scaled`, `0.18` Active-Shift Gate & `(d_scaled / 0.90)^2` Kernel | Expanded Stratum 1 QMC anchor range to `[0.16, 0.38]`, synchronized `d_scaled = y_drop / max_y_drop` with `y_arr`, gated `active_coal_rows` at `d_scaled >= 0.18`, and replaced `(d_scaled / 0.35)^2` with `(d_scaled / 0.90)^2`. | **Colab 10-Sample `mmlu` Test (`xwhy_pipeline_v4.5.5.mmlu.log`):** Passed **10/10** on `Weighted R²` (`0.9375–0.9974`, mean `0.9629`), **10/10** on `Stability` (`0.9808–0.9971`, mean `0.9888`), **10/10** on `Token AUC` (`0.9097–1.0000`, mean `0.9528`), and **8/10** on `Consistency < 0.05` (`0.0086–0.0403`), with only `mmlu/0001` (`0.0882`) and `mmlu/0004` (`0.0654`) missing `Consistency` due to 23/26 flat-ceiling low-band ties (`min(pi_raw[i], 0.006 * span_mask_local[i])`) and `tau` floor amplification (`tau >= 0.005..0.02`). Documented in Section 16. |
-| **`v4.5.6` (Current)** | 8-File Modular DAG (Targeted `xwhy_core.py` Upgrade) | Three-Band Tie-Free Affine Scaling, Universal `surface_spec` + `w_rep`, `1.65` Domain-Noun Rescue & Proportional `tau = mu_raw.copy()` | Upgraded **only `xwhy_core.py`**: computed `surface_spec` and `len_factor` for all tokens (including `len <= 2`), rescued 5+ letter domain nouns (`"group"`) at `best_rank >= 150 and max_vec_norm >= 1.65`, applied occurrence decay `w_rep` to all tokens before `span_mask_local`/`is_short_or_low_info` checks, replaced flat-ceiling clamping with 3-band tie-free affine scaling (`[0.25, 1.00]`, `[0.0012, 0.0065]`, `[0.00002, 0.00025]`), and set `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` so `delta_b = tau * gamma_d` scales as $O(\tau_j^2)$. | **Active Production Release (`v4.5.6`):** Eliminates all low-band rank ties and box-wall flipping on short `MMLU` prompts while preserving 10/10 `Weighted R²`, `Stability`, and `Token AUC` across all 6 benchmarks. |
+| **`v4.5.6`** | 8-File Modular DAG (Targeted `xwhy_core.py` Upgrade) | Three-Band Tie-Free Affine Scaling, Universal `surface_spec` + `w_rep`, `1.65` Domain-Noun Rescue & Proportional `tau = mu_raw.copy()` | Upgraded **only `xwhy_core.py`**: computed `surface_spec` and `len_factor` for all tokens (including `len <= 2`), rescued 5+ letter domain nouns (`"group"`) at `best_rank >= 150 and max_vec_norm >= 1.65`, applied occurrence decay `w_rep` to all tokens before `span_mask_local`/`is_short_or_low_info` checks, replaced flat-ceiling clamping with 3-band tie-free affine scaling (`[0.25, 1.00]`, `[0.0012, 0.0065]`, `[0.00002, 0.00025]`), and set `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` so `delta_b = tau * gamma_d` scales as $O(\tau_j^2)$. | **Rejected (Failed Integrity Audit, 2026-10-29):** Row-index kernel collapse (`d_coal_loc`, `sigma_loc` down to `0.26`), `r1 = min(0.035, 1/K)` multiplicative box around a static prior, response-dependent kernel factor `(d_scaled / 0.90)^2`, `r2_try >= 0.935` threshold-seeking stopping rule, and span-mask down-weighting of template tokens to `[2e-5, 2.5e-4]` in `full_prompt` mode. Documented in Section 19. |
+| **`v4.6.0` (Current)** | 8-File Modular DAG (`xwhy_core.py` rewrite; budget/schema/bug-fix alignment in `xwhy_metrics.py`, `xwhy_multimodel_pipeline.py`, `xwhy_providers.py`) | Legitimate, full-data, full-prompt surrogate | Product perturbation measure `q = 1/(K+1)` (simulation-guided, disclosed); KernelSHAP complete-stratum rule for every stratum incl. single-token occlusions (complete up to `K ≈ 223` at `M = 384`); identity-keyed CRN sampling with no duplicates and no salience-driven design; layout-preserving token deletion; mask-only post-stratified kernel with collapsed sparse strata; weighted least squares on all rows; heteroscedastic empirical-Bayes shrinkage of sampled-coalition corrections toward the LLM's exact occlusion effects; GCV ridge for longer scopes; ceiling `384` aligned across baseline, Stability and Consistency; Word2Vec prior, span masks, trust-region box and output stopword filter removed; `importance_words` Stability index bug and checkpoint-schema reuse fixed. | **Pending empirical Colab/Kaggle validation.** Offline unit, synthetic, stubbed end-to-end tests and two independent agent reviews only (Section 21). Thresholds are **not** guaranteed (Section 22). |
 
 ---
 
@@ -277,3 +278,319 @@ All `v4.5.6` upgrades are strictly encapsulated inside Layer 4 (`xwhy_core.py`);
 ### Upgrade 2: Proportional Prior Metric Tensor `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` (`_fit_cd_smile_prior_anchored_surrogate`)
 - Applies `emp_unit` modulation only to Band 1 open-class content tokens (`emp_mod = np.where(base_prior >= 0.05, (1.0 - emp_blend) + emp_blend * emp_unit, 1.0)`).
 - Sets `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` and `delta_b = tau * gamma_d` so $\delta\beta_j = O(\tau_j^2)$ and $|\delta\beta_j| / \beta_{0, j} \propto \tau_j \le 0.65\%$ on Band 2 and Band 3 tokens, preventing low-band tokens from ever hitting box walls or swapping ranks across seeds.
+
+---
+
+## 19. Why `v4.5.6` Was Rejected (Integrity Audit, 2026-10-29)
+
+`v4.5.6` reached its Colab numbers through mechanisms that let the reported metrics be decided by the surrogate's own construction rather than by the LLM's perturbation responses. Every item below was verified against the `v4.5.6` source (`git show de2e493:xwhy_core.py`).
+
+1. **Row-index kernel collapse (`d_coal_loc`).** Active rows were sorted and given sequential ranks `1, 2, 3, ...` (`d_coal_loc[m_row] = float(coal_idx)`), dead-zone rows were parked at `25.0 + dz_idx`, and the kernel was `exp(-0.5 * ((d_coal_loc / sigma_loc)^2 + (d_scaled / 0.90)^2))` with `sigma_loc` stepping down through `(2.00, 1.25, 0.80, 0.50, 0.26)`. At `sigma_loc = 0.26` the second-ranked row's weight relative to the first is `exp(-0.5 * ((2 / 0.26)^2 - (1 / 0.26)^2)) ≈ 2.3e-10`, so one row carries essentially the entire weighted R² while the rest sit at the `1e-12` floor. A row's position in a sort order is not a distance in perturbation space, so this kernel has no statistical meaning.
+2. **Response-dependent kernel.** The `(d_scaled / 0.90)^2` term made a row's weight shrink as the LLM's output moved further from the baseline output. The rows that are hardest to fit therefore lost weight, which inflates weighted R² in the same way the forbidden residual filters did.
+3. **Threshold-seeking stopping rule.** The `(box, sigma_loc, lam_s)` search stopped the first time `r2_try >= 0.935`, a target set just above the `0.90` pass mark. Choosing hyperparameters by "stop once the score clears the threshold" is threshold seeking.
+4. **Multiplicative box around a static prior.** `b_raw = np.clip(beta_0_loc + delta_b, (1 - r1) * beta_0_loc, (1 + r1) * beta_0_loc)` with `beta_0_loc = alpha_0_loc * mu_raw` and `r1 = min(0.035, 1 / max(10, K))`. The ordering and relative sizes of the coefficients were therefore fixed to within `±1/K` of the Word2Vec prior `mu_raw`, whatever the LLM did. Consistency and Stability then measured the prior, not the explanation.
+5. **Span-mask template zeroing in `full_prompt` mode.** `_compute_word2vec_information_prior` used `_compute_content_span_mask` (built from the dataset loader's `content_char_spans`) to push every out-of-span token into the band `[0.00002, 0.00025]`, against `[0.25, 1.00]` for in-span content tokens. That is the same template/content partition `GroundTruthExtractor` uses for `TEMPLATE_BOILERPLATE = 0`, so in `full_prompt` mode the template tokens were effectively zeroed by dataset metadata. This is structural ground-truth leakage.
+6. **Benchmark-tuned constants.** Examples are the `best_rank >= 150 and max_vec_norm >= 1.65` "domain noun rescue" (tuned to `"group"` in `mmlu/validation_0001`), `qmark_rank_floor = 380 / 3800`, `w_span = 1.35`, `w_bound = 1.25`, `w_punct = 1.35 / 1.20 / 1.10`, `cos_weight = 0.08 / 0.05`, and the three band boundaries. None is derived from a principle, and several were introduced specifically to move individual failing samples.
+7. **Salience-driven perturbation design.** `generate_structured_perturbation_masks` gave non-salient tokens a `+0.45` score bias (`length_bias`) and reserved the single-token LOO rows (`tail_cap <= 6`) for Word2Vec-"salient" tokens. Function words were never measured individually, so their attributions could only come from the prior.
+8. **`pos_micro`.** No index-dependent `pos_micro` term exists in the `v4.5.6` source on this branch (`grep` finds none). `v4.6.0` contains no positional term of any kind, so the concern cannot arise.
+
+---
+
+## 20. `v4.6.0` Mathematical Formulation
+
+All coefficients in `v4.6.0` are computed from the LLM's responses on every perturbation row. No lexical prior, span mask, stopword list, box constraint, or response-dependent weight is used anywhere in the surrogate or in the output distance.
+
+### 20.1 Perturbation measure, and how its drop rate was chosen
+
+Every active token is deleted independently with probability $q = 1/(K+1)$ (product measure $\mu_q$). The number of deleted tokens is $k \sim \mathrm{Binomial}(K, q)$ with stratum masses $m_k = \binom{K}{k} q^k (1-q)^{K-k}$. This value of $q$ is the unique drop rate with $m_0 = m_1$, since $(1-q)^K = Kq(1-q)^{K-1} \iff q = 1/(K+1)$. The expected number of deletions is $K/(K+1) < 1$, so the neighbourhood stays local at every prompt length (lesson of `v4.3.9`).
+
+**Disclosure: the "$m_0 = m_1$" criterion is this work's own design rule, not a literature result, and the choice was simulation-guided.** Before adopting it, drop rates of the form $q = c/K$ with $c \in \{1, 2\}$ were compared, together with seven estimator variants (plain WLS, GCV ridge, evidence-Bayes ridge with and without a prior, and homoscedastic and heteroscedastic empirical Bayes). The comparison used the synthetic black box of Section 21, and the script printed the share of synthetic prompts meeting the four thresholds. On that toy, `c = 1` beat `c = 2`:
+- median weighted R² was about 0.90–0.92 against 0.85–0.89;
+- consistency distances were lower.
+
+`q = 1/(K+1)` (≈ `c = 1`) was then adopted, and $m_0 = m_1$ is the interpretation of that choice. No benchmark data or real LLM was used in the selection, and the code contains no threshold-based stopping rule. Users who prefer a different locality can treat `c` as a sensitivity parameter.
+
+### 20.2 Design (`generate_structured_perturbation_masks`)
+
+- **Exhaustive** when $2^K \le M$ (all $K \le 8$ at `M = 384`): all masks, seed-free.
+- Otherwise, **row 0** is the baseline $\mathbf{1}_K$, and strata $k = 1, 2, \dots$ are **enumerated completely only while $\binom{K}{k}$ fits inside the stratum's proportional share** $R \cdot m_k / \sum_{k' \ge k} m_{k'}$ of the remaining budget $R$ (the KernelSHAP complete-stratum rule; Lundberg & Lee 2017).
+  - The same rule governs the single-deletion stratum: all $K$ occlusions $\mathbf{1}_K - \mathbf{e}_j$ (Zeiler & Fergus 2014; Li, Monroe & Jurafsky 2016) are included when $K \lesssim 0.58\,(M - 1)$, i.e. **for scopes of up to 223 words at `M = 384`**.
+  - At least ~42% of the budget therefore always goes to multi-token coalitions, and the surrogate cannot saturate the design. The first draft forced the occlusion stratum in whenever $K + 1 \le M$; that saturated it near $K \approx M$ (Section 21, review finding 1).
+- **Stochastic strata:** the remaining rows are drawn with stratum probability $\propto m_k$. Within a stratum, the $k$ tokens with the smallest counter-based uniforms $u = \mathrm{BLAKE2b}(\text{seed}, \text{counter}, \text{token\#occurrence})$ are deleted (Salmon et al. 2011).
+  - Keying by token identity means an inserted Stability token leaves every other token's draws untouched (common random numbers; Glasserman & Yao 1992); 94% of baseline rows reappear after an insertion at `K = 40`.
+  - Duplicates are rejected and exhausted strata are closed, so **no row is ever repeated or tiled**.
+- **Layout-preserving deletion (`_delete_tokens_preserving_layout`):** deleted tokens are removed from the original text. Between kept tokens, the whitespace run with the most line breaks is kept, so the all-ones mask reproduces the prompt byte for byte and every row differs from it only by the deleted tokens. Earlier versions rebuilt every perturbed prompt with `" ".join(...)`, which silently removed all newlines, so every occlusion effect also contained a "reformatting" effect.
+- **Identifiability guard:** a design at most one token larger than an exhaustive one ($K + 1 \le M$ and $2^K \le 2M$) always contains the complete single-deletion stratum. This applies, for example, to the Stability variant of a 2-word scope (`K' = 3` at `M = 4`). Under the share rule alone, such a variant could leave a token never deleted, so its coefficient was 0 (second-round review finding). Dynamic baselines are unaffected: they are exhaustive for `K ≤ 8`, and their occlusion stratum fits its share for `K = 9`.
+- Every token is treated identically: no Word2Vec rank, norm, salience, span, or position enters the design.
+
+### 20.3 Kernel (`_post_strata`, `_stratified_kernel_weights`)
+
+$w_r = m_{g(r)} / n_{g(r)}$, the Horvitz–Thompson / post-stratification weight of the row's post-stratum (Horvitz & Thompson 1952; Cochran 1977, §5A.9). The weights are a function of the binary mask only.
+- Completely enumerated strata are their own post-strata.
+- Sampled strata, including empty ones, are **collapsed** in increasing $k$ until every post-stratum holds at least two rows (collapsed strata; Cochran 1977, §5A.12). No single sampled row can therefore inherit a whole stratum's mass.
+- The baseline row enters as one observation with the per-row weight of the single-deletion rows, so it is never up-weighted relative to its nearest neighbours (no repeat of the `v4.3.7` `weights[r0]` inflation).
+
+Kish's effective sample size $(\sum w)^2 / \sum w^2$ is reported in `raw_data["kernel_effective_sample_size"]` (and `ScopedXWhyResult.metrics`). Measured values:
+
+| K | 5 | 12 | 40 | 100 | 200 | 223 | 224 | 300 | 383 | 500 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Rows | 32 | 384 | 384 | 384 | 384 | 384 | 384 | 384 | 384 | 384 |
+| Kish ESS | 11.1 | 30.8 | 108.3 | 247.5 | 376.3 | 382.8 | 354.5 | 363.9 | 373.3 | 376.5 |
+
+For `K ≥ 224`, the stochastic strata depend on the token strings and the seed, so the ESS varies slightly with the prompt. An independent check on different tokens measured 357.4 / 373.2 / 376.9 / 379.2 for the last four columns. In `v4.5.6` the effective sample size was about 1–2 rows.
+
+**Concentration, disclosed:** when the occlusion stratum is complete, the baseline plus the $K$ single-deletion rows carry about 66% of the total weight at `K = 9` (10 of 384 rows), 64% at `K = 12`, 60% at `K = 40`, and 59% at `K = 100`. This is the locality of $\mu_q$, not a collapse: no row carries more than 6.6% of the weight at `K ≥ 9`, and every coalition row keeps a weight proportional to its stratum's probability. In the exhaustive designs (`K ≤ 8`), masks with many deletions get tiny weights, as their probability under $\mu_q$ dictates:
+- No mask is below `1e-4` of the largest weight for `K ≤ 6`, 6.2% of masks are at `K = 7`, and 14.5% at `K = 8`.
+- The 23–34% of masks with the most deletions (`K = 7–8`) together carry less than 0.1% of the weight.
+
+### 20.4 Weighted least squares
+
+$\hat\beta_{\mathrm{WLS}} = A^{+}\tilde X^\top W \tilde y$ with weighted-mean centring and $A = \tilde X^\top W \tilde X$ (Moore–Penrose pseudo-inverse, so no jitter constant is needed). Under the **full** product measure, the population solution of this problem would be the weighted Banzhaf value of the LLM response (Hammer & Holzman 1992; Marichal & Mathonet 2011). The baseline row is down-weighted to its neighbours' per-row weight (`0.074` instead of the $\mu_q$ mass `0.390` at `K = 8`), so the estimand here is close to that value but not equal to it. In a `K = 8` test with interactions, it differed by a nearly common shift of all coefficients of about 0.6% of the largest coefficient.
+
+### 20.5 Heteroscedastic empirical Bayes toward the exact occlusion effects
+
+When the design contains every occlusion row, $o_j = y(\mathbf{1}) - y(\mathbf{1} - \mathbf{e}_j)$ is the LLM's exact single-token occlusion effect, which is deterministic and seed-free. It is measured against the baseline row with the identical prompt layout (20.2), and the baseline row's distance is computed against its own prompt, so it never falls back to another prompt's logprobs.
+
+The correction $\hat\delta = \hat\beta_{\mathrm{WLS}} - o$ carries all of the seed dependence. Its design-based sampling variance $v_j$ is the stratified linearisation (sandwich) variance over the post-strata (Binder 1983; Cochran 1977, Ch. 5). It uses leverage-adjusted (HC2) residuals $e^{*}_r = e_r/\sqrt{1 - h_r}$ with weighted hat values $h_r = w_r(1 + \tilde x_r^\top A^{+}\tilde x_r)$ (MacKinnon & White 1985), because raw residuals shrink as the number of coefficients approaches the number of rows. With scores $s_r = w_r \tilde x_r e^{*}_r$,
+
+$$V = A^{+}\Big[\sum_g \big(1 - \tfrac{n_g}{N_g}\big)\tfrac{n_g}{n_g - 1}\sum_{r \in g}(s_r - \bar s_g)(s_r - \bar s_g)^\top\Big]A^{+},\qquad N_g = \sum_{k \in g}\tbinom{K}{k}.$$
+
+Completely enumerated strata contribute zero.
+
+**Calibration, disclosed.** Monte Carlo over 120 seeds on the synthetic black box (median ratio of estimated to empirical variance of $\hat\beta_{\mathrm{WLS}}$):
+
+| K | 12 | 40 | 100 | 200 |
+| --- | --- | --- | --- | --- |
+| HC2 (current) | 1.03 | 0.95 | 0.88 | 0.66 |
+| Raw residuals (first draft; independent review) | 0.95 | 0.89 | 0.65 | 0.32 |
+
+Long scopes (`K ≈ 150–223`) therefore still get somewhat *less* shrinkage than the model intends. HC3 residuals overshoot (1.06–1.38), and HC2, which is exactly unbiased under homoscedastic errors, was kept.
+
+The empirical-Bayes model (Efron & Morris 1973; Morris 1983) is
+
+$$\hat\delta_j \mid \delta_j \sim N(\delta_j, v_j), \qquad \delta_j \sim N(0,\; a\,o_j^2 + b),$$
+
+a relative-error prior plus a common floor $b$ that admits pure interaction effects. $(a, b)$ maximise the marginal likelihood over the **closed** set $[0, \infty)^2$: a log-grid that includes exact zeros, then a restarted Nelder–Mead. $a$ is fixed at 0 when every $o_j = 0$, which happens for providers without logprobs. The reported coefficient is $\beta_j = o_j + \hat\delta_j \,\frac{a o_j^2 + b}{a o_j^2 + b + v_j}$.
+
+Properties:
+- With a complete design (`v = 0`) the estimator returns $\hat\beta_{\mathrm{WLS}}$.
+- An additive response is recovered exactly with $R^2 = 1$.
+- Exact-zero occlusion effects whose corrections are pure noise stay exactly tied.
+- The shrinkage target is the LLM's own measured response, not a static prior.
+
+### 20.6 Calibration, intercept, and what the fidelity number means
+
+A single least-squares scale factor (applied only if positive) and the weighted intercept are re-fitted. A positive common scale leaves rank order and the L1-normalised profile unchanged. Because $\hat\beta_{\mathrm{WLS}}$ already minimises the weighted residual sum of squares, **steps 20.5–20.6 can only lower the reported weighted R² relative to the WLS optimum, never raise it.** This held in 648 adversarial fits run by the reviewers; the maximum excess was 3e-16. The weighted R² is computed by the unmodified upstream `RegressionMetrics.calculate` with the true feature count, on the exact coefficients reported.
+
+**In-sample optimism, disclosed:** the reported fidelity is in-sample, as in upstream XWhy. Fed purely random distances (no relation to the masks), the estimator gives:
+
+| K | 5 | 12 | 40 | 100 | 200 | 223 | 224 | 300 | 383 | 500 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Pure-noise R² (mean) | 0.49 | 0.27 | 0.26 | 0.33 | 0.52 | 0.57 | 0.40 | 0.47 | 0.50 | 0.56 |
+| Pure-noise R² (max) | 0.70 | 0.32 | 0.30 | 0.39 | 0.55 | 0.60 | 0.46 | 0.51 | 0.55 | 0.60 |
+
+A pass at `R² > 0.90` therefore requires real, locally additive structure in the LLM's responses. With the first draft's forced occlusion stratum, pure noise reached R² ≈ 0.99 at `K = 380` and exactly 1 at `K = 383`; the complete-stratum rule of 20.2 removed this. For `K = 1` the fit is exact (2 rows, 2 parameters, R² = 1 always), and at `K = 2` a pure-noise response still clears 0.90 about 38% of the time. Fidelity is uninformative for one- and two-word scopes, a consequence of the brief's `min(ceiling, 2^K)` rule.
+
+### 20.7 Long scopes (`K ≥ 224` at `M = 384`)
+
+The single-deletion stratum does not fit its budget share, so single-deletion rows are sampled like the other strata, and the coefficients use weighted ridge with the penalty chosen by generalised cross-validation (Golub, Heath & Wahba 1979). No prior or box is used. Expect clearly lower Consistency in this regime (Section 22).
+
+**Estimator switch at the boundary, disclosed.** A baseline scope of exactly 223 words uses the occlusion + empirical-Bayes estimator. Every one of its Stability variants has 224 words and therefore uses GCV ridge. Stability for 223-word scopes compares two different estimators and can only come out lower: in one toy check, Spearman 0.952 and generalised Jaccard 0.935, against 0.994 / 0.961 at `K = 150`.
+
+### 20.8 Perturbation ceiling `384` and Run 1 / Run 2 alignment
+
+`NUM_PERTURBATIONS = DEFAULT_MAX_PERTURBATIONS = DEFAULT_FULL_PROMPT_MAX_PERTURBATIONS = 384`, the brief's maximum. Simulations favoured 384 over 256 at `K ≈ 100`: minimum R² 0.83 vs 0.76, maximum consistency distance 0.11 vs 0.13.
+
+Run 1 and Run 2 now use the same budget everywhere:
+- In `xwhy_metrics.py`, `stab_perts` and `cons_perts` were `min(orig_perts, 48)` and are now `orig_perts`, falling back to `NUM_PERTURBATIONS`.
+- In `xwhy_multimodel_pipeline.py`, `main()` passes the shared constants instead of literal `48`s.
+- The GOAL-mode fallback (target span missing or empty) now delegates to the FULL_PROMPT branch, so it also gets a dynamic budget and a `num_perturbations` attribute.
+
+### 20.9 Engineering changes
+
+- **DRY:** `_enhanced_llm_explain` (the patched `LLMExplainer.explain`) and `direct_scoped_explain` share three helpers:
+  - `_make_provider_answer_fn`, with identical call arguments, so both paths hit the same response-cache entries;
+  - `_query_and_fit_perturbations`, covering inference, distances, min-max normalisation, the surrogate, and the same `min_valid_ratio`;
+  - `_PerturbationFit.regression_metrics()`, `.status`, and `.kernel_effective_sample_size`.
+
+  The dead upstream `find_best` + `SurrogateFactory` fit inside `explain`, whose result was discarded, was removed. `best_surrogate_method` now reports the method actually used (`cd_smile_occlusion_eb`). Both paths return identical coefficients in the smoke test.
+- **Bounded logprob snapshots:**
+  - *Problem.* `_RECENT_OLLAMA_LOGPROBS` holds at most 512 keys, roughly 100–170 calls. At 384 perturbations the baseline's first-token distribution was evicted before distances were computed, and lookups fell back to the `("__resp__", output)` key of whichever later prompt produced the same text.
+  - *Fix.* `_snapshot_prompt_logprobs` copies each distribution right after its query into a provider-scoped FIFO store bounded at 1024 → 768 entries, the bound of the provider response cache. `_lookup_prompt_logprobs` reads that store first, and `xwhy_providers._reclaim_sample_memory` now clears it together with the response cache after every sample.
+  - No Ollama, context-window, VRAM, or Word2Vec compaction setting was changed. `raw_data["binary_masks"]` is stored as a `uint8` array (about 8× smaller than tuples of Python ints), so per-sample RAM stays flat at `M = 384`.
+- **Output distance:**
+  - The patched `WMDDistance.compute` used to drop every output word with Word2Vec frequency rank < 150 (OOV words defaulted to rank 25000) before computing WMD. That is a frequency-based stopword filter with magic constants; upstream `WMDDistance` has none.
+  - It was removed, so every in-vocabulary output word now takes part in the transport problem.
+- **Importance words:**
+  - `extract_model_importance_words` no longer filters the model's keywords through the Word2Vec prior (`pi_full >= 0.10`) or a `len >= 3` rule.
+  - If the model names no matchable word, the full prompt scope is used.
+- **Checkpoints:** `PIPELINE_CHECKPOINT_SCHEMA_VERSION = "4.6.0"` and `_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.0"}`. Before this change, `resume=True` would silently reload pre-`v4.6.0` results, including the rejected `v4.5.6` ones, for every scope of up to 5 words: their fingerprint, `min(48, 2^K) = min(384, 2^K)`, was unchanged.
+- **Evaluation bug fixed (pre-existing, `xwhy_metrics.py`):**
+  - *Problem.* In `importance_words` mode, `evaluate_explanation_stability` passed `var_imp_indices = list(range(n))`, so the variant runs perturbed prompt positions `0..n-1` (e.g. `"could"`, `"Question:"`, `"Which"`) while labelling them as the importance words. The variant prompt was also rebuilt with single spaces, losing every newline.
+  - *Fix.* The variant now perturbs the importance words at their real (shifted) positions plus the injected token, in a prompt built by `_inject_token_preserving_layout`.
+  - *Consequence.* **`importance_words` Stability numbers from all earlier versions are invalid.**
+- **Removed:**
+  - `_compute_word2vec_information_prior`, with every band, rescue, and span-weight constant in it;
+  - `_fit_cd_smile_prior_anchored_surrogate`, replaced by `_fit_cd_smile_occlusion_eb_surrogate`;
+  - the `zlib` CRC32 coalition hashing;
+  - the `_compute_content_span_mask` / `_compute_word_char_spans` imports;
+  - the unused `content_char_spans` / `goal_char_span` attributes on the FULL_PROMPT perturbator;
+  - 16 unused imports. pyflakes reports 0 issues for `xwhy_core.py`, down from 22, and no new issue in any other file.
+- **Small fixes:**
+  - `ScopedContextWrapper.wrapped_ans` accepts `prompt=` as callers pass it.
+  - Default budgets of 64 now use `NUM_PERTURBATIONS`.
+  - Stale comments and docstrings were updated.
+  - Perturbation-design rows look up logprobs strictly by their own prompt (`strict_prompt_lookup=True`). The all-deleted row (`""`) of an exhaustive full-prompt design can no longer pick up another prompt's distribution through the `("__resp__", output)` fallback.
+  - Importance words that arrive without indices are located in the prompt by `locate_tokens_in_prompt`, or an error is raised. They are never assumed to sit at positions `0..n-1`; this applies in `explain_instance_with_scoping` and in the Stability fallback.
+  - `ImportanceWordsTextPerturbation.set_context` refreshes `full_prompt`.
+  - `_post_strata` runs in linear time.
+
+### 20.10 References
+
+- Banzhaf / least squares: P. L. Hammer & R. Holzman, *ZOR – Methods and Models of Operations Research* 36 (1992); J.-L. Marichal & P. Mathonet, *EJOR* 211 (2011).
+- Binder, D. A., "On the variances of asymptotically normal estimators from complex surveys," *Int. Statistical Review* 51 (1983).
+- Cochran, W. G., *Sampling Techniques*, 3rd ed., Wiley (1977).
+- Efron, B. & Morris, C., "Stein's estimation rule and its competitors—an empirical Bayes approach," *JASA* 68 (1973); Morris, C., "Parametric empirical Bayes inference: theory and applications," *JASA* 78 (1983).
+- Glasserman, P. & Yao, D. D., "Some guidelines and guarantees for common random numbers," *Management Science* 38 (1992).
+- Golub, G. H., Heath, M. & Wahba, G., "Generalized cross-validation as a method for choosing a good ridge parameter," *Technometrics* 21 (1979).
+- Horvitz, D. G. & Thompson, D. J., *JASA* 47 (1952); Kish, L., *Survey Sampling*, Wiley (1965).
+- Li, J., Monroe, W. & Jurafsky, D., "Understanding neural networks through representation erasure," arXiv:1612.08220 (2016); Zeiler, M. D. & Fergus, R., *ECCV* (2014).
+- Lundberg, S. M. & Lee, S.-I., "A unified approach to interpreting model predictions," *NeurIPS* (2017); Ribeiro, M. T., Singh, S. & Guestrin, C., "Why should I trust you?," *KDD* (2016); Covert, I., Lundberg, S. & Lee, S.-I., "Explaining by removing," *JMLR* 22 (2021).
+- MacKinnon, J. G. & White, H., "Some heteroskedasticity-consistent covariance matrix estimators with improved finite sample properties," *J. Econometrics* 29 (1985).
+- Salmon, J. K. et al., "Parallel random numbers: as easy as 1, 2, 3," *SC'11* (2011).
+
+---
+
+## 21. Verification Performed for `v4.6.0` (and What Was Not Run)
+
+**Not run:** the real pipeline on any dataset with any Ollama or commercial model. The upstream `xwhy` package pulls in `torch`, `diffusers`, and other dependencies that were not available offline, and no GPU was available. The Colab/Kaggle numbers in Sections 2–16 were therefore **not** reproduced, and no claim is made that `v4.6.0` passes the four thresholds on real data.
+
+What was run:
+
+1. **Static checks.**
+   - `python3 -W error -c "import ast; ast.parse(open('xwhy_core.py').read())"` exits `0`. The only message is a `ResourceWarning` about the one-liner's own unclosed `open()`.
+   - `pyflakes xwhy_core.py` reports 0 issues, and no other edited file gains one.
+2. **Unit tests on the functions extracted verbatim from `xwhy_core.py`** (0 failures):
+   - designs are deterministic per seed;
+   - there are no duplicate rows, and row 0 is the baseline;
+   - the occlusion stratum is complete exactly when the KernelSHAP share rule says so;
+   - exhaustive designs are seed-free;
+   - no sampled post-stratum has a single row;
+   - weights are normalised, non-negative, and mask-only;
+   - reported R² is never above the WLS optimum;
+   - additive responses are recovered exactly with R² = 1;
+   - pure-noise R² stays below 0.75 at every K tested (table in 20.6);
+   - layout-preserving deletion reproduces the prompt and never merges lines;
+   - constant-response, empty, and `K = 500` edge cases behave.
+3. **Synthetic black-box study.** The black box has heavy-tailed token effects, pairwise interactions, an answer-flip threshold, and continuous (logprob) or quantised (no-logprob) outputs. Six prompts per row; Stability is modelled with one injected weak token plus 8% response drift. **This is a deliberately harsh toy, not evidence about real LLMs, and it is also the toy on which `q` and the estimator were chosen (20.1).**
+
+| Regime | K | Weighted R² min / median | Consistency distance max / median | Stability min / median | AUC min / median |
+| :--- | ---: | :---: | :---: | :---: | :---: |
+| logprob | 12 | 0.859 / 0.899 | 0.042 / 0.000 | 0.569 / 0.885 | 0.630 / 0.963 |
+| logprob | 40 | 0.892 / 0.903 | 0.077 / 0.041 | 0.889 / 0.950 | 0.875 / 0.931 |
+| logprob | 100 | 0.858 / 0.892 | 0.046 / 0.012 | 0.840 / 0.901 | 0.901 / 0.937 |
+| logprob | 200 | 0.841 / 0.884 | 0.125 / 0.004 | 0.893 / 0.944 | 0.936 / 0.965 |
+| discrete | 40 | 0.891 / 0.902 | 0.054 / 0.044 | 0.865 / 0.930 | 0.880 / 0.931 |
+| discrete | 100 | 0.855 / 0.889 | 0.056 / 0.047 | 0.821 / 0.879 | 0.902 / 0.932 |
+| discrete | 200 | 0.840 / 0.879 | 0.077 / 0.040 | 0.861 / 0.914 | 0.938 / 0.954 |
+
+   On the same toy, plain WLS, GCV ridge, and evidence-Bayes ridge on the same design gave consistency distances of 0.15–0.35 at `K >= 40`.
+
+4. **Stubbed end-to-end smoke test:** real repository modules and upstream `xwhy` source, heavy third-party packages stubbed, and a deterministic toy provider with fake logprobs.
+   - Imports succeed, the ceilings are 384, and the checkpoint schema is `4.6.0`-only.
+   - The baseline row reproduces a newline-formatted prompt exactly.
+   - The patched `explain` and `direct_scoped_explain` return identical coefficients: R² 0.995 and ESS 42.3 at `K = 16`.
+   - The snapshot store stays below its bound.
+5. **Two independent review agents** (integrity audit against Section III of the brief, and statistics/engineering review) read the full diff, the old `v4.5.6` code, and the upstream source.
+   - The integrity audit found no direct cheating in the estimator: no box, no prior, no ground-truth imports, no residual weights, no fake `num_features`, and no positional terms.
+   - Between them, the reviewers reported:
+     - R² saturation and kernel concentration for `K` near `M`;
+     - the reformatting confound and the baseline-row logprob fallback;
+     - the rank-150 output stopword filter;
+     - the `importance_words` Stability index bug;
+     - the stale checkpoint schema;
+     - the GOAL-fallback and direct-path budget/argument mismatches;
+     - missing collapsed strata in the variance;
+     - the EB overflow when every $o_j = 0$;
+     - undisclosed simulation-based selection of `q`;
+     - documentation inaccuracies.
+   - Every finding was fixed or is disclosed in this section and Sections 20 and 22.
+   - **Second review round.** Both reviewers re-verified the fixes.
+     - The integrity auditor confirmed that every finding was resolved and that the fixes (the share rule for `k = 1`, collapsed strata, the `importance_words` correction) introduce no integrity problem.
+     - The statistics reviewer found two further issues, both now fixed:
+       - the variance was underestimated for long scopes (HC2 added, disclosed in 20.5);
+       - the `k = 1` share rule broke Stability for 2-word scopes (identifiability guard added, 20.2).
+     - Minor items, all fixed or disclosed:
+       - the `__resp__` fallback on the empty-prompt row;
+       - the estimator switch at `K = 223/224`;
+       - `range(n)` index fallbacks;
+       - two Change-log figures.
+
+**Runtime cost:** at `M = 384`, one sample-mode costs about `384` (baseline) `+ 7 × 384` (Stability) `+ 384` (Consistency; the response cache is normally evicted by then) `+ 2` (ablation) ≈ **3,460 LLM calls**, against about 434 at the old ceiling of 48. Budget about 8× the previous wall-clock time.
+
+---
+
+## 22. Known Limitations & Honest Expectations for `v4.6.0`
+
+`v4.6.0` removes every mechanism that let the surrogate decide the metrics. The metrics now measure the LLM and the estimator honestly, so **some samples should be expected to fail some thresholds**, especially in the following cases:
+
+- **Fidelity (`R² > 0.90`)** depends on how additive the LLM's response is in the one-deletion neighbourhood, and nothing hides answer flips caused by pairs of deletions.
+  - The number is in-sample, so pure noise alone reaches about 0.3–0.6 (20.6).
+  - It is uninformative for one- and two-word scopes.
+- **Consistency (`1 − ρ < 0.05`)** is computed over all K tokens.
+  - *Vacuous for small K.* For `K ≤ 8` the design is exhaustive and seed-free, so Consistency is 1 by construction. For `K ≤ 12`, at least 98.6% of the kernel weight sits on rows that seeds 42 and 43 share. The test is only informative for longer scopes.
+  - *Hardest cases:*
+    - providers without logprobs (Anthropic, often Gemini), where many deletions return the identical answer;
+    - exchangeable tokens with identical non-zero effects, which are ordered by sampling noise (ρ = 0.57 in the toy smoke test with 13 bit-identical filler effects);
+    - commercial APIs that are not bit-deterministic at temperature 0;
+    - **scopes of 224+ words**, which use GCV ridge without the occlusion anchor (20.7), and Stability for **223-word** scopes, whose variants switch estimator.
+- **Stability (`> 0.80`)** falls when an injected token genuinely changes the model's answer. In that case the low score is the correct measurement.
+- **AUC (`> 0.70`)** reflects only the LLM's responses. No lexical prior or output stopword filter favours content words, so if the model reacts to template tokens such as `Answer:` in `full_prompt` mode, those tokens receive high attribution.
+  - Pre-existing and unchanged: the inference wrapper appends "State the answer and key phrase from the text in one short line:" to every query (`_augment_prompt_for_continuous_rationale`). Outputs therefore often quote prompt words, which makes output distances sensitive to deleting the quoted words.
+  - It is applied identically to every row, so it is part of the model being explained, but it does shape which tokens matter.
+- **The design-based variance is close to calibrated up to `K ≈ 100`** (0.88–1.03 of the empirical variance) **but about 0.66 of it at `K = 200`** (20.5). Long scopes therefore get somewhat less empirical-Bayes shrinkage than the model intends.
+
+If real runs fall short, the legitimate levers are evidence-based:
+- inspect per-row `raw_data` (`text_distances`, `weights`, `kernel_effective_sample_size`);
+- improve the response signal (logprob availability or the distance definition) without substituting inputs for outputs;
+- report the limitations above.
+
+Re-introducing priors, boxes, response-dependent weights, or forced deterministic strata is not a legitimate lever.
+
+---
+
+## 23. Status of Earlier "DO NOT REPEAT" Rules After `v4.6.0`
+
+- **Still in force:** #1, #2, #3, #4, #5, #9, #10, #11, #13 (honoured by identity-keyed CRN), #16, #17 (strengthened: no duplicate rows at all), #22 (no box of any width), #25, #31 (no prior at all; BLAKE2b is used only in the mask sampler).
+- **Amended:** #21. The intent, alignment between Run 1 and Run 2, is kept, but the shared value is now `384`, and `xwhy_metrics.py` re-runs at the baseline's own `num_perturbations`.
+- **Rescinded:** these rules prescribed mechanisms rejected in Section 19.
+  - #8, #26, #29: row-index `d_coal_loc` kernel and `sigma_loc` schedule.
+  - #18, #20, #30, #33, #35, #37: multiplicative trust-region box and its `r1/r2/r3` and `lam_s` schedules.
+  - #24: LOO rows reserved for "salient" tokens.
+  - #39, #40: response-dependent `d_scaled` kernel.
+- **Obsolete:** these components no longer exist.
+  - #6, #12, #15, #19, #32, #36: `lam_vec`/`tau` scalings, `w_coal`/`w_tier`, `1e-12` kernel floors, `emp_rate` pseudo-counts, Stratum-1 priority sorting.
+  - #7, #14, #27, #41, #42: the Word2Vec information prior.
+  - #23, #28, #34, #38: drop-fraction strata `[0.16, 0.38]` / `[0.24, 0.44]` and the anchor/stochastic split, superseded by Section 20.2.
+
+---
+
+## 24. New "DO NOT REPEAT" Guardrails (#43 – #59)
+
+43. **DO NOT REPEAT (`v4.5.6` Audit Failure): Row order inside the kernel.** Kernel weights must be a function of the binary mask alone, such as its deletion count. Never use ranks, sort positions, or row indices.
+44. **DO NOT REPEAT (`v4.5.4`–`v4.5.6`): Response-dependent kernel weights.** Never let `y`, `d_scaled`, output distances, or residuals enter the regression or R² weights. Residuals may enter only variance estimates (20.5), which can lower but never raise R².
+45. **DO NOT REPEAT (`v4.5.6` Audit Failure): Any box, clip, or trust region around a prior or reference vector.**
+46. **DO NOT REPEAT (`v4.5.6` Audit Failure): Threshold-seeking hyperparameter searches.** Never stop or select when a fit statistic crosses a target (`r2_try >= 0.935`). Use criteria fixed in advance (marginal likelihood, GCV, a stated design rule), and **disclose any design choice that was compared on simulated threshold pass rates** (20.1).
+47. **DO NOT REPEAT (`v4.5.6` Audit Failure): Dataset span metadata in the surrogate.** Never scale attributions with `content_char_spans`, `_compute_content_span_mask`, or goal spans, and do not attach them to the FULL_PROMPT perturbator. The template/content partition is exactly the ground-truth `TEMPLATE_BOILERPLATE` label.
+48. **DO NOT REPEAT (`v4.5.6`): Salience-driven designs.** Never let Word2Vec rank, norm, length, or any lexical score decide which tokens are perturbed, how often, or which receive an occlusion row.
+49. **DO NOT REPEAT (`v4.4.9`–`v4.5.6`): Constants tuned to individual samples.** Examples are the `1.65` norm rescue for `"group"` and band edges chosen to break observed ties.
+50. **DO NOT REPEAT (`v4.6.0` finding): Distances computed after the logprob side-cache has turned over.** Keep `_snapshot_prompt_logprobs` in the inference wrapper whenever `M > ~100`, and look design rows up strictly by their own prompt (never by response text).
+51. **DO NOT REPEAT (`v4.4.6` / `v4.6.0`): Different budgets for Run 1 and Run 2.** Stability and Consistency must re-run at the baseline's own `num_perturbations`, including on fallback paths.
+52. **DO NOT REPEAT (`v4.6.0` finding): Variance-component searches bounded away from zero.** Empirical-Bayes variance parameters must range over the closed set `[0, ∞)`.
+53. **DO NOT REPEAT (general): Fidelity reported for a different coefficient vector than the explanation.**
+54. **DO NOT REPEAT (`v4.6.0` draft, review finding): Forcing a deterministic stratum regardless of budget.** Forcing all `K` single-deletion rows whenever `K + 1 ≤ M` saturated the design near `K ≈ M`: pure-noise R² reached 0.99 at `K = 380` and 1.0 at `K = 383`. Every stratum, including `k = 1`, must pass the same complete-stratum share rule. The only exception is the identifiability guard for designs at most one token beyond exhaustive (20.2), whose re-runs never report a fidelity used for thresholds.
+55. **DO NOT REPEAT (`v4.6.0` draft, review finding): Single sampled rows carrying a stratum's mass.** Collapse sparse sampled strata so every post-stratum has at least two rows. In the draft, one row carried 29% of the weight at `K = 380`.
+56. **DO NOT REPEAT (pre-`v4.6.0`): Reformatting perturbed prompts.** Never rebuild perturbed prompts with `" ".join(...)` when the original contains newlines. Deletion must preserve layout, so occlusion effects measure the token and nothing else.
+57. **DO NOT REPEAT (pre-`v4.6.0`): Resuming checkpoints across explainer versions.** Bump `PIPELINE_CHECKPOINT_SCHEMA_VERSION` and restrict `_VALID_CHECKPOINT_SCHEMA_VERSIONS` whenever the explainer changes.
+58. **DO NOT REPEAT (pre-`v4.6.0`): Positional indices `range(n)` for importance-word variants.** Map importance indices to their real positions in the variant prompt, and locate tokens that arrive without indices (`locate_tokens_in_prompt`) or fail loudly.
+59. **DO NOT REPEAT (pre-`v4.6.0`): Frequency-rank stopword filters in the output distance** (`rank >= 150`, OOV default `25000`). Upstream WMD has none, and such a filter is a hidden stopword lexicon.

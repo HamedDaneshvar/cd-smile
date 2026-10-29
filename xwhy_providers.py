@@ -1479,6 +1479,10 @@ def _reclaim_sample_memory(
         smile_cache = getattr(prov_obj, "_smile_response_cache", None)
         if isinstance(smile_cache, dict):
             smile_cache.clear()
+        # v4.6.0: per-prompt logprob snapshots (xwhy_core._snapshot_prompt_logprobs) live and die with the cache.
+        logprob_snapshots = getattr(prov_obj, "_xwhy_logprob_snapshots", None)
+        if isinstance(logprob_snapshots, dict):
+            logprob_snapshots.clear()
     if result is not None and hasattr(result, "raw_data") and isinstance(result.raw_data, dict):
         keys_to_strip = (
             ("perturbed_texts", "text_distances", "similarities", "weights", "y_target", "y_pred")
