@@ -51,6 +51,7 @@ try:
         GLOBAL_GROUND_TRUTH_REGISTRY,
         GroundTruthAnnotation,
         GroundTruthRegistry,
+        align_ground_truth_strict,
         align_ground_truth_with_features,
         get_or_create_ground_truth,
     )
@@ -59,8 +60,12 @@ try:
         SEED,
         ScopedXWhyResult,
         TEMPERATURE,
+        _delete_tokens_preserving_layout,
+        _fit_cd_smile_occlusion_eb_surrogate,
         compute_genuine_semantic_distance,
         explain_instance_with_scoping,
+        explanation_target,
+        generate_structured_perturbation_masks,
         locate_tokens_in_prompt,
     )
 except ImportError:
@@ -87,6 +92,7 @@ except ImportError:
         GLOBAL_GROUND_TRUTH_REGISTRY,
         GroundTruthAnnotation,
         GroundTruthRegistry,
+        align_ground_truth_strict,
         align_ground_truth_with_features,
         get_or_create_ground_truth,
     )
@@ -95,8 +101,12 @@ except ImportError:
         SEED,
         ScopedXWhyResult,
         TEMPERATURE,
+        _delete_tokens_preserving_layout,
+        _fit_cd_smile_occlusion_eb_surrogate,
         compute_genuine_semantic_distance,
         explain_instance_with_scoping,
+        explanation_target,
+        generate_structured_perturbation_masks,
         locate_tokens_in_prompt,
     )
 
@@ -304,28 +314,29 @@ def extract_metrics_dict(metrics: Any) -> dict[str, Any]:
 # ============================================================================
 
 
-def evaluate_token_auc(result: Any, truth: list[int]) -> float:
-    """Calculate the Area Under the ROC Curve (AUC) for token importance magnitudes.
+def evaluate_token_auc(result: Any, truth: list[int]) -> float | None:
+    """Calculate the Area Under the ROC Curve (AUC) for token importance magnitudes (test suite v1).
 
     Evaluates attribution magnitudes `|c_i|` via the exact Mann-Whitney U rank-sum
     statistic when both positive (`1`) and negative (`0`) classes are present in `truth`.
     When `truth` contains only a single class (`len(unique_classes) < 2`), ROC AUC is
     mathematically undefined and the function transparently returns the random-chance
-    baseline `0.5`.
+    baseline `0.5`. Missing labels or a label/attribution length mismatch give `None`
+    (a missing score) instead of a silent `0.5` (test-suite v2 defect fix).
 
     Args:
         result: Explanation result object exposing feature names and coefficients.
         truth: Binary ground-truth label list (1 for relevant token, 0 for irrelevant).
 
     Returns:
-        float: ROC AUC score in `[0.0, 1.0]`.
+        float | None: ROC AUC score in `[0.0, 1.0]`, or `None` when it cannot be computed.
     """
     if truth is None or len(truth) == 0:
-        return 0.5
+        return None
 
     _, coefs = extract_features_and_scores(result)
     if len(coefs) != len(truth) or len(coefs) == 0:
-        return 0.5
+        return None
 
     abs_scores = [abs(float(c)) for c in coefs]
     unique_classes = set(int(t) for t in truth)
@@ -337,20 +348,7 @@ def evaluate_token_auc(result: Any, truth: list[int]) -> float:
             len(truth),
         )
         return 0.5
-
-    import numpy as np
-    from scipy.stats import rankdata
-
-    y_true = np.asarray(truth, dtype=int)
-    y_score = np.asarray(abs_scores, dtype=float)
-    n_pos = int(np.sum(y_true == 1))
-    n_neg = int(np.sum(y_true == 0))
-    if n_pos == 0 or n_neg == 0:
-        return 0.5
-    ranks = rankdata(y_score)
-    pos_ranks_sum = float(np.sum(ranks[y_true == 1]))
-    u_stat = pos_ranks_sum - (n_pos * (n_pos + 1)) / 2.0
-    return float(u_stat / (n_pos * n_neg))
+    return _mann_whitney_auc(abs_scores, [int(t) for t in truth])
 
 
 calculate_token_auc = evaluate_token_auc
@@ -674,8 +672,16 @@ def evaluate_explanation_stability(
     model_name: str = "",
     provider: ProviderType | str = "",
     api_key: str | None = None,
+    conditioned_target: tuple[str, str] | None = None,
+    v2_details: list[dict[str, Any]] | None = None,
 ) -> tuple[float | None, float | None, list[dict[str, Any]]]:
     """Evaluate explanation stability under 7 controlled superficial prompt variations.
+
+    Test suite v1 compares the baseline with each variant's explanation of the variant's own
+    answer. When `conditioned_target = (base_prompt, base_answer)` and `v2_details` are given,
+    each variant is also explained with the base answer as the explained response
+    (`explanation_target`), and `stability_v2_similarity` of that run is appended to
+    `v2_details` (test suite v2; `None` entries when a run or the alignment fails).
 
     Args:
         explainer: Configured LLMExplainer instance.
@@ -690,6 +696,8 @@ def evaluate_explanation_stability(
         model_name: Target model name.
         provider: Active provider enum or string.
         api_key: Optional provider API key.
+        conditioned_target: Base prompt and answer for the conditioned (v2) runs.
+        v2_details: Output list receiving one v2 record per variation.
 
     Returns:
         tuple[float | None, float | None, list[dict[str, Any]]]: Tuple of
@@ -697,6 +705,7 @@ def evaluate_explanation_stability(
     """
     if original_result is None:
         return None, None, []
+    base_names, base_coefs = extract_features_and_scores(original_result)
 
     resolved_mode = resolve_perturbation_mode(mode, enable_scoped_perturbation)
 
@@ -822,11 +831,13 @@ def evaluate_explanation_stability(
         LOGGER.debug("  Modified Target Text   : %r", modified_target)
         LOGGER.debug("%s\n", "-" * 85)
 
-        try:
-            orig_perts = getattr(original_result, "num_perturbations", None)
-            # v4.6.0: re-run at the baseline's own budget M so Run 1 and Run 2 use identical design sizes.
-            stab_perts = int(orig_perts) if orig_perts else NUM_PERTURBATIONS
-            var_result = explain_instance_with_scoping(
+        orig_perts = getattr(original_result, "num_perturbations", None)
+        # v4.6.0: re-run at the baseline's own budget M so Run 1 and Run 2 use identical design sizes.
+        stab_perts = int(orig_perts) if orig_perts else NUM_PERTURBATIONS
+
+        def _explain_variant() -> Any:
+            """Explain the current variation at the baseline's budget."""
+            return explain_instance_with_scoping(
                 explainer=explainer,
                 prompt_text=var_prompt,
                 spans=var_spans,
@@ -840,6 +851,9 @@ def evaluate_explanation_stability(
                 importance_indices=var_imp_indices,
                 num_perturbations=stab_perts,
             )
+
+        try:
+            var_result = _explain_variant()
 
             res_tuple = calculate_stability_score(original_result, var_result, return_details=True)
             if isinstance(res_tuple, tuple) and len(res_tuple) == 3:
@@ -863,6 +877,25 @@ def evaluate_explanation_stability(
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Stability evaluation variation '%s' failed: %s", var_id, exc)
             failed_variations.append(var_id)
+
+        if conditioned_target is not None and v2_details is not None:
+            v2_sim: float | None = None
+            v2_share: float | None = None
+            n_base = len(base_names)
+            expected = 0 if pos == "start" else (n_base if pos == "end" else n_base // 2)
+            if resolved_mode == PerturbationMode.IMPORTANCE_WORDS and var_imp_indices:
+                expected = list(var_imp_indices).index(insert_at) if insert_at in var_imp_indices else None
+            try:
+                with explanation_target(explainer, conditioned_target[0], conditioned_target[1]) as active:
+                    v2_result = _explain_variant() if active else None
+                if v2_result is not None:
+                    v2_names, v2_coefs = extract_features_and_scores(v2_result)
+                    v2_sim, v2_share = stability_v2_similarity(
+                        base_names, base_coefs, v2_names, v2_coefs, expected_index=expected
+                    )
+            except Exception as exc:  # noqa: BLE001
+                LOGGER.warning("Stability v2 variation '%s' failed: %s", var_id, exc)
+            v2_details.append({"variation_id": var_id, "similarity": v2_sim, "filler_share": v2_share})
 
     # v4.6.2 (DO-NOT-REPEAT #62): a failed variation makes Stability missing; never average the survivors.
     mean_sim = float(sum(sims) / len(sims)) if sims and not failed_variations else None
@@ -1047,10 +1080,10 @@ def evaluate_explanation_consistency(
                 return 1.0, 1.0
             return 0.0, float(len(common_words) / max(1, len(all_union)))
 
-        if float(np.std(arr1)) <= 1e-9 or float(np.std(arr2)) <= 1e-9:
-            spearman_val = 0.0
-        elif np.allclose(arr1, arr2, rtol=1e-5, atol=1e-7):
+        if np.allclose(arr1, arr2, rtol=1e-5, atol=1e-7):
             spearman_val = 1.0
+        elif float(np.std(arr1)) <= 1e-9 or float(np.std(arr2)) <= 1e-9:
+            spearman_val = 0.0
         else:
             from scipy.stats import spearmanr
             rho, _ = spearmanr(arr1, arr2)
@@ -1158,10 +1191,21 @@ def _construct_ablated_prompts(
     top_kept_scope = [w for idx, w in enumerate(names) if idx not in top_k_indices]
     bot_kept_scope = [w for idx, w in enumerate(names) if idx not in bot_k_indices]
 
+    def _keep_mask(n_tokens: int, dropped: set[int]) -> tuple[int, ...]:
+        """Keep (1) / delete (0) flag per token."""
+        return tuple(0 if idx in dropped else 1 for idx in range(n_tokens))
+
+    # Test-suite v2 defect fix: delete with `_delete_tokens_preserving_layout` (the explainer's own
+    # deletion), not `" ".join`, which also removed every newline of the prompt.
     if resolved_mode == PerturbationMode.GOAL and target_scope in spans:
         start_idx, end_idx = spans[target_scope]
         prefix = prompt_text[:start_idx]
         suffix = prompt_text[end_idx:]
+        scope_text = prompt_text[start_idx:end_idx]
+        if len(scope_text.split()) == len(names):
+            top_scope = _delete_tokens_preserving_layout(scope_text, _keep_mask(len(names), set(top_k_indices)))
+            bot_scope = _delete_tokens_preserving_layout(scope_text, _keep_mask(len(names), set(bot_k_indices)))
+            return f"{prefix}{top_scope}{suffix}", f"{prefix}{bot_scope}{suffix}"
         top_prompt = f"{prefix}{' '.join(top_kept_scope)}{suffix}"
         bot_prompt = f"{prefix}{' '.join(bot_kept_scope)}{suffix}"
         return top_prompt, bot_prompt
@@ -1172,10 +1216,14 @@ def _construct_ablated_prompts(
         if len(imp_indices) == len(names):
             top_drop_full = {imp_indices[i] for i in top_k_indices if 0 <= imp_indices[i] < len(full_tokens)}
             bot_drop_full = {imp_indices[i] for i in bot_k_indices if 0 <= imp_indices[i] < len(full_tokens)}
-            top_prompt = " ".join(tok for idx, tok in enumerate(full_tokens) if idx not in top_drop_full)
-            bot_prompt = " ".join(tok for idx, tok in enumerate(full_tokens) if idx not in bot_drop_full)
+            top_prompt = _delete_tokens_preserving_layout(prompt_text, _keep_mask(len(full_tokens), top_drop_full))
+            bot_prompt = _delete_tokens_preserving_layout(prompt_text, _keep_mask(len(full_tokens), bot_drop_full))
             return top_prompt or prompt_text, bot_prompt or prompt_text
 
+    if len(prompt_text.split()) == len(names):
+        top_prompt = _delete_tokens_preserving_layout(prompt_text, _keep_mask(len(names), set(top_k_indices)))
+        bot_prompt = _delete_tokens_preserving_layout(prompt_text, _keep_mask(len(names), set(bot_k_indices)))
+        return top_prompt, bot_prompt
     top_prompt = " ".join(top_kept_scope) if top_kept_scope else ""
     bot_prompt = " ".join(bot_kept_scope) if bot_kept_scope else ""
     return top_prompt, bot_prompt
@@ -1212,6 +1260,7 @@ def evaluate_explanation_fidelity(
     target_scope: str = "goal",
     enable_scoped_perturbation: bool | None = None,
     compute_ablation_fidelity: bool = True,
+    details: dict[str, Any] | None = None,
 ) -> tuple[float | None, float | None, float | None]:
     r"""Evaluate surrogate R2 goodness-of-fit and empirical feature-ablation faithfulness.
 
@@ -1229,6 +1278,8 @@ def evaluate_explanation_fidelity(
         mode: Active perturbation mode (`FULL_PROMPT`, `GOAL`, or `IMPORTANCE_WORDS`).
         target_scope: Target span key ('goal').
         enable_scoped_perturbation: Legacy boolean flag for backward compatibility.
+        details: Optional output dict receiving `d_top`, `d_bot` and `k` of the queried ablation
+            (test suite v2 compares `d_top` with the random-k null).
 
     Returns:
         tuple[float | None, float | None, float | None]: Tuple of
@@ -1359,6 +1410,8 @@ def evaluate_explanation_fidelity(
                 d_bot = 0.0
 
             norm_fidelity, delta = _normalized_ablation_delta(d_top, d_bot)
+            if details is not None:
+                details.update(d_top=d_top, d_bot=d_bot, k=k)
             return surrogate_r2, norm_fidelity, delta
 
         # If `explainer` is None (e.g. offline inspection of a saved result object),
@@ -1395,6 +1448,381 @@ def evaluate_explanation_fidelity(
 # ----------------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------------
+# 9.8. Test Suite v2 (`v4.6.3`, owner-approved after the three-agent review, Change-log 26.14 / 27)
+# ----------------------------------------------------------------------------
+# ============================================================================
+# NOTE [TEST SUITE V2]:
+# - The v1 tests above are kept exactly as designed so every report shows both suites side by side.
+# - v2 changes what each test measures, following the review's recommendations:
+#   1. AUC is a plausibility diagnostic (reported, never gated). Labels invented by the single-class
+#      guard, single-class scopes and unannotated features give a missing score instead of a made-up
+#      one, and a model-free word-length scorer is reported on the same labels as a baseline.
+#   2. Stability: every filler variant explains the BASE prompt's answer (`explanation_target`), only
+#      the original tokens are compared (aligned by position, renormalised), and the filler's share
+#      of the attribution is reported separately.
+#   3. Consistency: mean pairwise (1 - rank-biased overlap, p = 0.9) over 5 seeds, a top-weighted
+#      rank agreement (Webber et al., TOIS 2010); not applicable when the design ignores the seed.
+#   4. Faithfulness: held-out R^2 (5-fold cross-validation over the design rows, refitting the
+#      explainer's own estimator) with evaluator-fixed weights (equal total weight per deletion
+#      count), not applicable for K <= 3; plus the top-k vs bottom-k ablation sign
+#      (comprehensiveness, DeYoung et al., ACL 2020) as a gate.
+# ============================================================================
+
+CONSISTENCY_V2_SEEDS: Final[int] = 5
+RBO_PERSISTENCE: Final[float] = 0.9
+HELDOUT_FOLDS: Final[int] = 5
+MIN_FEATURES_FOR_HELDOUT_R2: Final[int] = 4
+
+
+def _mann_whitney_auc(scores: list[float], labels: list[int]) -> float | None:
+    """Exact ROC AUC of `scores` for binary `labels` via the Mann-Whitney U statistic with mid-ranks.
+
+    Args:
+        scores: Real-valued scores, one per label.
+        labels: Binary labels (1 = relevant).
+
+    Returns:
+        float | None: AUC in `[0, 1]`, or `None` when a class is empty or lengths differ.
+    """
+    import numpy as np
+    from scipy.stats import rankdata
+
+    if len(scores) != len(labels) or not labels:
+        return None
+    y_true = np.asarray(labels, dtype=int)
+    n_pos = int(np.sum(y_true == 1))
+    n_neg = int(np.sum(y_true == 0))
+    if n_pos == 0 or n_neg == 0:
+        return None
+    ranks = rankdata(np.asarray(scores, dtype=float))
+    u_stat = float(np.sum(ranks[y_true == 1])) - (n_pos * (n_pos + 1)) / 2.0
+    return float(u_stat / (n_pos * n_neg))
+
+
+def evaluate_plausibility_auc(
+    annotation: GroundTruthAnnotation | None,
+    feature_names: list[str],
+    coefficients: list[float],
+) -> tuple[float | None, float | None, str]:
+    """Test-suite v2 plausibility AUC (reported, not gated) and its model-free baseline.
+
+    Args:
+        annotation: Ground-truth annotation view for the active mode.
+        feature_names: Explanation feature names.
+        coefficients: Explanation attributions.
+
+    Returns:
+        tuple[float | None, float | None, str]: `(auc, length_baseline_auc, notes)`; both AUCs are
+            `None` when the labels were invented, single-class, or not aligned.
+    """
+    if annotation is None:
+        return None, None, "No ground-truth annotation."
+    if annotation.truth_adjusted:
+        return None, None, "Not applicable: a label was invented by a fallback or the single-class guard."
+    labels, is_aligned, notes = align_ground_truth_strict(annotation, feature_names)
+    if not is_aligned or labels is None or len(labels) != len(coefficients):
+        return None, None, f"Not aligned: {notes}"
+    keep = [idx for idx, label in enumerate(labels) if label is not None]
+    kept_labels = [int(labels[idx]) for idx in keep]
+    if len(set(kept_labels)) < 2:
+        return None, None, f"Not applicable: single-class labels on the {len(keep)} annotated features."
+    auc = _mann_whitney_auc([abs(float(coefficients[idx])) for idx in keep], kept_labels)
+    lengths = [float(len(_normalize_token(str(feature_names[idx])) or str(feature_names[idx])))
+               for idx in keep]
+    baseline = _mann_whitney_auc(lengths, kept_labels)
+    return auc, baseline, f"{len(keep)}/{len(labels)} features annotated ({notes})"
+
+
+def _attribution_order(scores: list[float]) -> list[int]:
+    """Feature indices ordered by decreasing |attribution| (ties by position)."""
+    return sorted(range(len(scores)), key=lambda idx: (-abs(float(scores[idx])), idx))
+
+
+def _rank_biased_overlap(
+    scores_a: list[float],
+    scores_b: list[float],
+    persistence: float = RBO_PERSISTENCE,
+) -> float:
+    r"""Rank-biased overlap of two complete attribution rankings of the same K features.
+
+    $\mathrm{RBO}_K = \frac{(1-p)/p}{1-p^K}\sum_{d=1}^{K} \frac{A_d}{d} p^d$ with $A_d$ the overlap
+    of the two top-$d$ sets (Webber, Moffat & Zobel, *ACM TOIS* 2010), truncated at depth K and
+    renormalised by the weight mass $1-p^K$ of depths 1..K. The extrapolated form adds the residual
+    weight $p^K$ at full agreement, which for complete short lists dominates (a fully reversed
+    4-token ranking would score 0.78). Identical rankings give 1; disagreement among the top ranks
+    costs most.
+
+    Args:
+        scores_a: Attributions of run A.
+        scores_b: Attributions of run B (same features, same order).
+        persistence: Top-weightedness `p` in `(0, 1)`.
+
+    Returns:
+        float: RBO in `[0, 1]`.
+    """
+    order_a = _attribution_order(scores_a)
+    order_b = _attribution_order(scores_b)
+    seen_a: set[int] = set()
+    seen_b: set[int] = set()
+    overlap = 0
+    total = 0.0
+    depth = len(order_a)
+    for d_idx in range(1, depth + 1):
+        item_a, item_b = order_a[d_idx - 1], order_b[d_idx - 1]
+        if item_a == item_b:
+            overlap += 1
+        else:
+            overlap += int(item_a in seen_b) + int(item_b in seen_a)
+        seen_a.add(item_a)
+        seen_b.add(item_b)
+        total += (overlap / d_idx) * persistence**d_idx
+    if depth == 0:
+        return 1.0
+    return float((1.0 - persistence) / persistence * total / (1.0 - persistence**depth))
+
+
+def _design_is_seed_free(words: list[str], num_perturbations: int, seed: int) -> bool:
+    """Whether the perturbation design for `words` at budget `num_perturbations` does not depend on the seed."""
+    first = generate_structured_perturbation_masks(len(words), num_perturbations, seed, words=words)
+    second = generate_structured_perturbation_masks(len(words), num_perturbations, seed + 1, words=words)
+    return set(map(tuple, first)) == set(map(tuple, second))
+
+
+def evaluate_explanation_consistency_v2(
+    explainer: LLMExplainer,
+    prompt_text: str,
+    spans: dict[str, tuple[int, int]],
+    original_result: Any,
+    mode: PerturbationMode,
+    target_scope: str = "goal",
+    importance_tokens: list[str] | None = None,
+    importance_indices: list[int] | None = None,
+    model_name: str = "",
+    provider: ProviderType | str = "",
+    api_key: str | None = None,
+    num_seeds: int = CONSISTENCY_V2_SEEDS,
+) -> tuple[float | None, str, str]:
+    """Test-suite v2 Consistency: mean pairwise `1 - RBO` over `num_seeds` seeds at the baseline budget.
+
+    RBO with persistence 0.9 weights the top ranks most (the top 10 carry about 65% of the weight),
+    so reordering among tokens with negligible effects costs little; v1's Spearman over all
+    tokens is still reported alongside.
+
+    Args:
+        explainer: Configured LLMExplainer instance.
+        prompt_text: Complete formatted prompt text.
+        spans: Character span offsets for prompt fields.
+        original_result: Baseline explanation (seed `config.seed`).
+        mode: Active perturbation mode.
+        target_scope: Target span key ('goal').
+        importance_tokens: Optional importance words.
+        importance_indices: Optional importance-word positions.
+        model_name: Target model name.
+        provider: Active provider enum or string.
+        api_key: Optional provider API key.
+        num_seeds: Number of seeds including the baseline's.
+
+    Returns:
+        tuple[float | None, str, str]: `(distance, status, notes)` with status `"ok"`,
+            `"not_applicable"` or `"missing"`.
+    """
+    import numpy as np
+
+    names, coefs = extract_features_and_scores(original_result)
+    if not names or len(coefs) != len(names):
+        return None, "missing", "No attributions."
+    if not any(abs(float(c)) > 0.0 for c in coefs):
+        return None, "missing", "Undefined: the baseline explanation attributes nothing (constant response)."
+    budget = int(getattr(original_result, "num_perturbations", 0) or NUM_PERTURBATIONS)
+    base_seed = int(getattr(getattr(explainer, "config", None), "seed", SEED))
+    runs = [list(coefs)]
+    try:
+        if _design_is_seed_free(list(names), budget, base_seed):
+            note = f"Not applicable: the {budget}-row design for K = {len(names)} does not depend on the seed."
+            return None, "not_applicable", note
+        for offset in range(1, int(num_seeds)):
+            other = explain_instance_with_scoping(
+                explainer=explainer,
+                prompt_text=prompt_text,
+                spans=spans,
+                mode=mode,
+                target_scope=target_scope,
+                fidelity_plot=False,
+                model_name=model_name,
+                provider=provider,
+                api_key=api_key,
+                importance_tokens=importance_tokens,
+                importance_indices=importance_indices,
+                num_perturbations=budget,
+                seed=base_seed + offset,
+            )
+            other_names, other_coefs = extract_features_and_scores(other)
+            if list(other_names) != list(names):
+                return None, "missing", f"Seed {base_seed + offset} explained different features."
+            runs.append(list(other_coefs))
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.warning("Consistency v2 evaluation failed: %s", exc)
+        return None, "missing", f"Failed: {exc}"
+    distances = [
+        1.0 - _rank_biased_overlap(runs[i], runs[j]) for i in range(len(runs)) for j in range(i + 1, len(runs))
+    ]
+    return float(np.mean(distances)), "ok", f"{len(runs)} seeds, mean pairwise 1 - RBO(p = {RBO_PERSISTENCE})"
+
+
+def _injected_feature_index(
+    base_names: list[str],
+    variant_names: list[str],
+    expected_index: int | None = None,
+) -> int | None:
+    """Index of the one feature whose removal turns `variant_names` into `base_names` (by position).
+
+    The caller's insertion position is tried first, so a filler equal to an existing token (for
+    example "please" appended after a final "please") is never confused with that token.
+    """
+    if len(variant_names) != len(base_names) + 1:
+        return None
+    candidates = ([expected_index] if expected_index is not None else []) + list(range(len(variant_names)))
+    for idx in candidates:
+        if 0 <= idx < len(variant_names) and variant_names[:idx] + variant_names[idx + 1 :] == base_names:
+            return idx
+    return None
+
+
+def stability_v2_similarity(
+    base_names: list[str],
+    base_coefs: list[float],
+    variant_names: list[str],
+    variant_coefs: list[float],
+    expected_index: int | None = None,
+) -> tuple[float | None, float | None]:
+    """Ruzicka similarity of the original tokens' renormalised |attributions|, aligned by position.
+
+    Args:
+        base_names: Baseline feature names.
+        base_coefs: Baseline attributions.
+        variant_names: Variant feature names (the baseline's plus one injected token).
+        variant_coefs: Variant attributions.
+        expected_index: Position at which the filler was inserted, when known.
+
+    Returns:
+        tuple[float | None, float | None]: `(similarity, filler_share)`; `(None, None)` when the
+            variant's features are not the baseline's plus exactly one injected token, and a `None`
+            similarity when either explanation attributes nothing (undefined, not a perfect match).
+    """
+    injected = _injected_feature_index(list(base_names), list(variant_names), expected_index)
+    if injected is None:
+        return None, None
+    variant_abs = [abs(float(c)) for c in variant_coefs]
+    total_variant = sum(variant_abs)
+    filler_share = variant_abs[injected] / total_variant if total_variant > 0.0 else 0.0
+    kept = variant_abs[:injected] + variant_abs[injected + 1 :]
+    base_abs = [abs(float(c)) for c in base_coefs]
+    base_total, kept_total = sum(base_abs), sum(kept)
+    if base_total <= 0.0 or kept_total <= 0.0:
+        return None, filler_share
+    a_vec = [v / base_total for v in base_abs]
+    b_vec = [v / kept_total for v in kept]
+    numerator = sum(min(a, b) for a, b in zip(a_vec, b_vec))
+    denominator = sum(max(a, b) for a, b in zip(a_vec, b_vec))
+    return (float(numerator / denominator) if denominator > 0.0 else 1.0), float(filler_share)
+
+
+def evaluate_heldout_fidelity(result: Any) -> tuple[float | None, str, str]:
+    """Test-suite v2 held-out R^2 of the explainer's own estimator.
+
+    The baseline row and every single-deletion row stay in every training fold, so each fold refits
+    the same estimator branch the explanation used (`_fit_cd_smile_occlusion_eb_surrogate` anchors
+    on the exact single-token occlusions). The multi-deletion rows (2+ deletions) are split into 5
+    folds stratified by deletion count; each fold is predicted from a fit on all other rows. R^2 is
+    computed on the held-out predictions with weights fixed by the evaluator, not by the explainer's
+    kernel: every deletion count present gets the same total weight.
+
+    Args:
+        result: Explanation result with `raw_data["fit_masks"]`, `raw_data["y_target"]` and
+            `raw_data["design_size"]`.
+
+    Returns:
+        tuple[float | None, str, str]: `(r2, status, notes)` with status `"ok"`, `"not_applicable"`
+            or `"missing"`.
+    """
+    import numpy as np
+
+    raw = getattr(result, "raw_data", None) or {}
+    masks, targets = raw.get("fit_masks"), raw.get("y_target")
+    if masks is None or targets is None:
+        return None, "missing", "No fitted design recorded."
+    x_arr = np.asarray(masks, dtype=float)
+    y_arr = np.asarray(targets, dtype=float).flatten()
+    n_rows = len(y_arr)
+    if x_arr.ndim != 2 or x_arr.shape[0] != n_rows:
+        return None, "missing", "Fitted design and targets differ in length."
+    n_features = x_arr.shape[1]
+    if n_features < MIN_FEATURES_FOR_HELDOUT_R2:
+        return None, "not_applicable", f"Not applicable for K = {n_features} (< {MIN_FEATURES_FOR_HELDOUT_R2})."
+    drops = np.rint(n_features - x_arr.sum(axis=1)).astype(int)
+    multi = np.where(drops >= 2)[0]
+    if len(multi) < 2 * HELDOUT_FOLDS or float(np.ptp(y_arr)) <= 1e-12:
+        return None, "not_applicable", "Not applicable: too few multi-deletion rows or a constant response."
+    design_size = int(raw.get("design_size") or getattr(result, "num_perturbations", 0) or n_rows)
+    fold = np.full(n_rows, -1, dtype=int)
+    rng = np.random.default_rng(0)
+    for count in np.unique(drops[multi]):
+        rows = multi[drops[multi] == count]
+        fold[rng.permutation(rows)] = np.arange(len(rows)) % HELDOUT_FOLDS
+    predictions = np.full(n_rows, np.nan)
+    for fold_id in range(HELDOUT_FOLDS):
+        test = fold == fold_id
+        if not np.any(test):
+            continue
+        train = ~test
+        beta, y_fit, _weights = _fit_cd_smile_occlusion_eb_surrogate(
+            x_arr[train], y_arr[train], design_size=design_size
+        )
+        intercept = float(np.mean(y_fit - x_arr[train] @ beta))
+        predictions[test] = intercept + x_arr[test] @ beta
+    held = multi
+    counts = drops[held]
+    strata, sizes = np.unique(counts, return_counts=True)
+    per_row = dict(zip(strata.tolist(), (1.0 / (len(strata) * sizes)).tolist()))
+    weights = np.asarray([per_row[c] for c in counts.tolist()], dtype=float)
+    y_held, p_held = y_arr[held], predictions[held]
+    mean_y = float(weights @ y_held / weights.sum())
+    total = float(weights @ (y_held - mean_y) ** 2)
+    if total <= 0.0:
+        return None, "not_applicable", "Not applicable: constant response on the held-out rows."
+    r2 = 1.0 - float(weights @ (y_held - p_held) ** 2) / total
+    notes = (
+        f"{HELDOUT_FOLDS}-fold held-out R^2 on {len(held)} multi-deletion rows (baseline and single deletions "
+        f"always in training), equal weight per deletion count ({len(strata)} counts)"
+    )
+    return float(r2), "ok", notes
+
+
+def random_k_ablation_distance(result: Any, k: int) -> float | None:
+    """Mean raw distance of the design rows that delete exactly `k` tokens (the random-k ablation null).
+
+    Args:
+        result: Explanation result with `raw_data["fit_masks"]` and `raw_data["fit_distances"]`.
+        k: Number of deleted tokens.
+
+    Returns:
+        float | None: Mean distance over the `k`-deletion rows, or `None` when the design has none.
+    """
+    import numpy as np
+
+    raw = getattr(result, "raw_data", None) or {}
+    masks, distances = raw.get("fit_masks"), raw.get("fit_distances")
+    if masks is None or distances is None:
+        return None
+    x_arr = np.asarray(masks, dtype=float)
+    d_arr = np.asarray(distances, dtype=float)
+    if x_arr.ndim != 2 or len(d_arr) != x_arr.shape[0]:
+        return None
+    rows = np.rint(x_arr.shape[1] - x_arr.sum(axis=1)).astype(int) == int(k)
+    return float(np.mean(d_arr[rows])) if np.any(rows) else None
+
+
 @dataclass
 class SampleEvaluationMetrics:
     """Consolidated evaluation metrics for an XWhy explanation.
@@ -1423,6 +1851,20 @@ class SampleEvaluationMetrics:
         fidelity_metrics: Nested dictionary containing all 9 surrogate fidelity metrics.
         ablation_fidelity: Normalized output shift difference between top-k and bottom-k feature removal.
         delta_ablation: Raw semantic distance delta (d_top - d_bottom).
+        plausibility_auc: Test-suite v2 AUC (reported, not gated; `None` when not applicable).
+        length_baseline_auc: AUC of the model-free word-length scorer on the same labels.
+        plausibility_auc_notes: Why the v2 AUC is or is not applicable.
+        stability_v2: Mean v2 Stability (base answer explained in every variant; `None` if any fails).
+        stability_v2_filler_share: Mean attribution share of the injected filler in the v2 runs.
+        stability_v2_by_variation: Per-variation v2 records.
+        consistency_v2_distance: Mean pairwise `1 - RBO` over 5 seeds (`None` when not applicable).
+        consistency_v2_notes: Why the v2 Consistency is or is not applicable.
+        heldout_r2: Test-suite v2 held-out R^2 (`None` when not applicable).
+        heldout_r2_notes: How the held-out R^2 was computed, or why it is not applicable.
+        consistency_v2_status: `"ok"`, `"not_applicable"` or `"missing"`.
+        heldout_r2_status: `"ok"`, `"not_applicable"` or `"missing"`.
+        ablation_top_k_distance: Raw distance after deleting the explainer's top-k tokens.
+        ablation_random_k_distance: Mean raw distance of the design rows deleting exactly k tokens.
     """
 
     token_auc: float | None = None
@@ -1448,6 +1890,20 @@ class SampleEvaluationMetrics:
     fidelity_metrics: dict[str, float | None] = field(default_factory=dict)
     ablation_fidelity: float | None = None
     delta_ablation: float | None = None
+    plausibility_auc: float | None = None
+    length_baseline_auc: float | None = None
+    plausibility_auc_notes: str = ""
+    stability_v2: float | None = None
+    stability_v2_filler_share: float | None = None
+    stability_v2_by_variation: list[dict[str, Any]] = field(default_factory=list)
+    consistency_v2_distance: float | None = None
+    consistency_v2_notes: str = ""
+    heldout_r2: float | None = None
+    heldout_r2_notes: str = ""
+    consistency_v2_status: str = ""
+    heldout_r2_status: str = ""
+    ablation_top_k_distance: float | None = None
+    ablation_random_k_distance: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Convert sample evaluation metrics to a JSON-serializable dictionary.
@@ -1503,6 +1959,20 @@ class SampleEvaluationMetrics:
             "fidelity_metrics": fid_dict,
             "ablation_fidelity": self.ablation_fidelity,
             "delta_ablation": self.delta_ablation,
+            "plausibility_auc": self.plausibility_auc,
+            "length_baseline_auc": self.length_baseline_auc,
+            "plausibility_auc_notes": self.plausibility_auc_notes,
+            "stability_v2": self.stability_v2,
+            "stability_v2_filler_share": self.stability_v2_filler_share,
+            "stability_v2_by_variation": self.stability_v2_by_variation,
+            "consistency_v2_distance": self.consistency_v2_distance,
+            "consistency_v2_notes": self.consistency_v2_notes,
+            "heldout_r2": self.heldout_r2,
+            "heldout_r2_notes": self.heldout_r2_notes,
+            "consistency_v2_status": self.consistency_v2_status,
+            "heldout_r2_status": self.heldout_r2_status,
+            "ablation_top_k_distance": self.ablation_top_k_distance,
+            "ablation_random_k_distance": self.ablation_random_k_distance,
         }
 
 
@@ -1647,8 +2117,15 @@ def evaluate_sample_comprehensively(
     compute_stability: bool = True,
     compute_consistency: bool = True,
     compute_ablation_fidelity: bool = True,
+    compute_test_suite_v2: bool = True,
 ) -> SampleEvaluationMetrics:
-    """Evaluate all Stage 2 explainability metrics for a single sample and populate full breakdown fields."""
+    """Evaluate all Stage 2 explainability metrics for a single sample and populate full breakdown fields.
+
+    With `compute_test_suite_v2` (default) the v2 metrics are computed next to v1: 7 conditioned
+    Stability runs and 3 more Consistency seeds per sample. Generations are cached, but each run is
+    refitted and the conditioned runs need prefill calls for the base answer. A failure in a v2
+    metric leaves it missing and never affects the v1 metrics.
+    """
     eval_metrics = SampleEvaluationMetrics()
     active_registry = registry or GLOBAL_GROUND_TRUTH_REGISTRY
 
@@ -1741,9 +2218,9 @@ def evaluate_sample_comprehensively(
                 eval_metrics.token_auc = calculate_token_auc(eval_result_for_auc, aligned_truth)
                 eval_metrics.token_accuracy = calculate_token_accuracy(eval_result_for_auc, aligned_truth)
                 LOGGER.info(
-                    "  [Accuracy / Token AUC] %.4f | Binary Acc: %.4f (%s)",
-                    eval_metrics.token_auc,
-                    eval_metrics.token_accuracy,
+                    "  [Accuracy / Token AUC] %s | Binary Acc: %s (%s)",
+                    "N/A" if eval_metrics.token_auc is None else f"{eval_metrics.token_auc:.4f}",
+                    "N/A" if eval_metrics.token_accuracy is None else f"{eval_metrics.token_accuracy:.4f}",
                     notes,
                 )
             except Exception as exc:
@@ -1758,7 +2235,21 @@ def evaluate_sample_comprehensively(
             sample_id,
         )
 
-    # 2. Stability Evaluation (Mean + All 7 Individual Perturbations)
+    # 1b. Test-suite v2 plausibility AUC (reported, not gated) and its model-free baseline.
+    if compute_test_suite_v2 and gt_ann is not None and len(feat_names) > 0:
+        try:
+            (
+                eval_metrics.plausibility_auc,
+                eval_metrics.length_baseline_auc,
+                eval_metrics.plausibility_auc_notes,
+            ) = evaluate_plausibility_auc(gt_ann, list(feat_names), list(feat_coefs))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Plausibility AUC (v2) failed: %s", exc)
+
+    # 2. Stability Evaluation (Mean + All 7 Individual Perturbations; v2 runs conditioned on the base answer)
+    base_prompt = (getattr(result, "raw_data", None) or {}).get("original_prompt")
+    base_answer = str(getattr(result, "original_output", "") or "")
+    stability_v2_records: list[dict[str, Any]] = []
     if compute_stability:
         m_sim, m_dist, v_details = evaluate_explanation_stability(
             explainer=explainer,
@@ -1772,6 +2263,8 @@ def evaluate_sample_comprehensively(
             model_name=model_name,
             provider=provider,
             api_key=api_key,
+            conditioned_target=(str(base_prompt), base_answer) if base_prompt and compute_test_suite_v2 else None,
+            v2_details=stability_v2_records,
         )
         eval_metrics.stability_similarity = m_sim
         eval_metrics.stability_distance = m_dist
@@ -1779,6 +2272,20 @@ def evaluate_sample_comprehensively(
         eval_metrics.stability_by_variation = _build_stability_by_variation_dict(v_details)
         if m_sim is not None:
             LOGGER.info("  [Stability] Jaccard Similarity: %.4f | Distance: %.4f", m_sim, m_dist)
+        eval_metrics.stability_v2_by_variation = stability_v2_records
+        v2_sims = [rec["similarity"] for rec in stability_v2_records]
+        complete = all(
+            s is not None and rec["filler_share"] is not None for s, rec in zip(v2_sims, stability_v2_records)
+        )
+        if len(v2_sims) == len(STABILITY_VARIATION_KEYS) and complete:
+            eval_metrics.stability_v2 = round(float(sum(v2_sims) / len(v2_sims)), 4)
+            shares = [float(rec["filler_share"]) for rec in stability_v2_records]
+            eval_metrics.stability_v2_filler_share = round(float(sum(shares) / len(shares)), 4)
+            LOGGER.info(
+                "  [Stability v2] %.4f (base answer explained in every variant; filler share %.4f)",
+                eval_metrics.stability_v2,
+                eval_metrics.stability_v2_filler_share,
+            )
 
     # 3. Consistency Evaluation
     if compute_consistency:
@@ -1797,6 +2304,30 @@ def evaluate_sample_comprehensively(
         )
         eval_metrics.consistency_spearman = c_spear
         eval_metrics.consistency_top_k = c_topk
+        if compute_test_suite_v2:
+            (
+                eval_metrics.consistency_v2_distance,
+                eval_metrics.consistency_v2_status,
+                eval_metrics.consistency_v2_notes,
+            ) = evaluate_explanation_consistency_v2(
+                explainer=explainer,
+                prompt_text=prompt_text,
+                spans=spans,
+                original_result=result,
+                mode=resolved_mode,
+                target_scope=target_scope,
+                importance_tokens=importance_tokens,
+                importance_indices=importance_indices,
+                model_name=model_name,
+                provider=provider,
+                api_key=api_key,
+            )
+            cons_v2 = eval_metrics.consistency_v2_distance
+            LOGGER.info(
+                "  [Consistency v2] %s (%s)",
+                "N/A" if cons_v2 is None else f"{cons_v2:.4f}",
+                eval_metrics.consistency_v2_notes,
+            )
         if c_spear is not None:
             eval_metrics.consistency_distance = round(float(1.0 - c_spear), 4)
             LOGGER.info(
@@ -1807,6 +2338,7 @@ def evaluate_sample_comprehensively(
             )
 
     # 4. Surrogate Fidelity (All 9 Metrics) & Ablation Faithfulness
+    ablation_details: dict[str, Any] = {}
     surr_r2, abl_fid, d_abl = evaluate_explanation_fidelity(
         explainer=explainer,
         prompt_text=prompt_text,
@@ -1815,6 +2347,7 @@ def evaluate_sample_comprehensively(
         mode=resolved_mode,
         target_scope=target_scope,
         compute_ablation_fidelity=compute_ablation_fidelity,
+        details=ablation_details,
     )
     fid_9 = _extract_all_nine_fidelity_metrics(result, fallback_r2=surr_r2)
     eval_metrics.surrogate_r2 = surr_r2 if surr_r2 is not None else fid_9.get("weighted_r2")
@@ -1830,6 +2363,24 @@ def evaluate_sample_comprehensively(
     eval_metrics.fidelity_metrics = fid_9
     eval_metrics.ablation_fidelity = abl_fid
     eval_metrics.delta_ablation = d_abl
+    if compute_test_suite_v2:
+        try:
+            eval_metrics.heldout_r2, eval_metrics.heldout_r2_status, eval_metrics.heldout_r2_notes = (
+                evaluate_heldout_fidelity(result)
+            )
+            if "d_top" in ablation_details:
+                eval_metrics.ablation_top_k_distance = float(ablation_details["d_top"])
+                eval_metrics.ablation_random_k_distance = random_k_ablation_distance(result, int(ablation_details["k"]))
+        except Exception as exc:  # noqa: BLE001
+            LOGGER.warning("Fidelity (v2) failed: %s", exc)
+            eval_metrics.heldout_r2_status = "missing"
+        LOGGER.info(
+            "  [Fidelity v2] held-out R2 %s (%s) | top-k ablation %s vs random-k %s",
+            "N/A" if eval_metrics.heldout_r2 is None else f"{eval_metrics.heldout_r2:.4f}",
+            eval_metrics.heldout_r2_notes,
+            eval_metrics.ablation_top_k_distance,
+            eval_metrics.ablation_random_k_distance,
+        )
     if eval_metrics.surrogate_r2 is not None:
         LOGGER.info(
             "  [Fidelity] Surrogate R2 (weighted): %.4f | Ablation Fidelity: %.4f (delta: %.4f)",

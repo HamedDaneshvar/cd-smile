@@ -1668,13 +1668,16 @@ def _reclaim_sample_memory(
             "_xwhy_original_logprob_sequences",
             "_xwhy_log_likelihood_memo",
             "_xwhy_response_measure",
+            "_xwhy_explanation_target",
+            "_xwhy_pinned_first_token",
         ):
             logprob_snapshots = getattr(prov_obj, snapshot_attr, None)
             if isinstance(logprob_snapshots, dict):
                 logprob_snapshots.clear()
     if result is not None and hasattr(result, "raw_data") and isinstance(result.raw_data, dict):
         keys_to_strip = (
-            ("perturbed_texts", "text_distances", "similarities", "weights", "y_target", "y_pred")
+            ("perturbed_texts", "text_distances", "similarities", "weights", "y_target", "y_pred", "fit_masks",
+             "fit_distances")
             if strip_plot_arrays
             else ("perturbed_texts", "text_distances", "similarities")
         )

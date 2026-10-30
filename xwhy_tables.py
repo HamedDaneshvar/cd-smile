@@ -20,6 +20,7 @@ from pathlib import Path
 import pickle
 import re
 import shutil
+import statistics
 import string
 import subprocess
 import sys
@@ -118,14 +119,11 @@ def validate_sample_metrics(
     # 1. Attribute AUC (> 70%)
     auc_ok = (auc is not None and auc > min_auc)
 
-    # 2. Consistency (< 0.05, near 0)
+    # 2. Consistency (< 0.05, near 0). Test-suite v2 defect fix: the ambiguous `consistency` key
+    # (a Spearman rho or a distance) is no longer read, so a rho of 0.02 cannot pass as a distance.
     cons = c_dist
-    if cons is None:
-        raw_c = record.get("consistency") if isinstance(record, dict) else None
-        if raw_c is not None:
-            cons = raw_c if raw_c <= 0.5 else (1.0 - raw_c)
-        elif c_spear is not None:
-            cons = round(float(1.0 - c_spear), 4)
+    if cons is None and c_spear is not None:
+        cons = round(float(1.0 - c_spear), 4)
     cons_ok = (cons is not None and cons < max_cons)
 
     # 3. Stability (> 80%, near 1)
@@ -184,6 +182,203 @@ def validate_sample_metrics(
         "failed_keys": failed_keys,
         "failure_reasons": failure_reasons,
     }
+
+
+# ----------------------------------------------------------------------------
+# 9.8. Test Suite v2 Audit (`v4.6.3`, owner-approved; Change-log 26.14 / 27)
+# ----------------------------------------------------------------------------
+# Gates (thresholds unchanged):
+# - Stability v2 > 0.80 and the filler's mean attribution share < (1 - 0.80) / (1 + 0.80) = 1/9, the
+#   total-variation bound the 0.80 Ruzicka threshold implies (so mass moved onto the filler still counts);
+# - Consistency v2 < 0.05; held-out R^2 > 0.90;
+# - ablation fidelity > 0 and the top-k deletion changes the answer more than an average k-deletion of
+#   the design (random-k null), when the design has k-deletion rows.
+# A gate whose metric is "not applicable" (seed-free design, K <= 3) is skipped; an applicable metric
+# that is missing fails. The plausibility AUC and its model-free word-length baseline are reported,
+# never gated. v1 verdicts are unchanged and reported alongside.
+
+V2_GATES: Final[tuple[str, ...]] = ("stability_v2", "consistency_v2", "heldout_r2", "ablation")
+
+
+def _record_value(record: dict[str, Any] | Any, key: str) -> Any:
+    """Read a metric from a serialized record or from a SampleArtifact's evaluation metrics."""
+    if isinstance(record, dict):
+        return record.get(key)
+    ev = getattr(record, "evaluation_metrics", None)
+    return getattr(ev, key, None) if ev is not None else None
+
+
+def validate_sample_metrics_v2(
+    record: dict[str, Any] | Any,
+    thresholds: dict[str, float] | None = None,
+) -> dict[str, Any]:
+    """Audit a single sample against test suite v2.
+
+    Args:
+        record: Dictionary or SampleArtifact containing evaluated metrics.
+        thresholds: Optional custom threshold overrides (same keys as v1).
+
+    Returns:
+        dict[str, Any]: Per-gate values, `"pass"` / `"fail"` / `"n/a"` outcomes, failure reasons,
+            the overall verdict, and the reported (ungated) plausibility AUC and its baseline.
+    """
+    thresh = thresholds or DEFAULT_VALIDATION_THRESHOLDS
+    min_stab = thresh.get("min_stability", 0.80)
+    max_cons = thresh.get("max_consistency", 0.05)
+    min_r2 = thresh.get("min_fidelity_r2", 0.90)
+
+    stab = _record_value(record, "stability_v2")
+    filler = _record_value(record, "stability_v2_filler_share")
+    max_filler = (1.0 - min_stab) / (1.0 + min_stab)
+    cons = _record_value(record, "consistency_v2_distance")
+    cons_status = str(_record_value(record, "consistency_v2_status") or "")
+    r2 = _record_value(record, "heldout_r2")
+    r2_status = str(_record_value(record, "heldout_r2_status") or "")
+    ablation = _record_value(record, "ablation_fidelity")
+    top_k = _record_value(record, "ablation_top_k_distance")
+    random_k = _record_value(record, "ablation_random_k_distance")
+
+    outcomes: dict[str, str] = {}
+    reasons: list[str] = []
+
+    def _gate(name: str, value: Any, ok: bool, not_applicable: bool, label: str) -> None:
+        """Record one gate's outcome: `"n/a"`, `"pass"`, or `"fail"` (missing values fail)."""
+        if not_applicable:
+            outcomes[name] = "n/a"
+        elif value is None:
+            outcomes[name] = "fail"
+            reasons.append(f"{label} missing")
+        else:
+            outcomes[name] = "pass" if ok else "fail"
+            if not ok:
+                reasons.append(f"{label} ({float(value):.3f})")
+
+    stab_ok = stab is not None and stab > min_stab and filler is not None and filler < max_filler
+    _gate("stability_v2", stab, stab_ok, False, f"Stability v2 <= {min_stab:.2f} or filler share >= {max_filler:.3f}")
+    _gate("consistency_v2", cons, cons is not None and cons < max_cons, cons_status == "not_applicable",
+          f"Consistency v2 >= {max_cons:.2f}")
+    _gate("heldout_r2", r2, r2 is not None and r2 > min_r2, r2_status == "not_applicable",
+          f"Held-out R2 <= {min_r2:.2f}")
+    beats_random = random_k is None or (top_k is not None and float(top_k) > float(random_k))
+    _gate("ablation", ablation, ablation is not None and ablation > 0.0 and beats_random, False,
+          "Ablation fidelity <= 0 or top-k deletion not above the random-k mean")
+
+    if isinstance(record, dict):
+        sample_id, dataset = record.get("sample_id", "unknown"), record.get("dataset", "unknown")
+    else:
+        sample_id, dataset = getattr(record, "sample_id", "unknown"), getattr(record, "dataset_key", "unknown")
+    return {
+        "sample_id": sample_id,
+        "dataset": dataset,
+        "passed": all(outcome != "fail" for outcome in outcomes.values()),
+        "outcomes": outcomes,
+        "stability_v2": stab,
+        "stability_v2_filler_share": filler,
+        "consistency_v2": cons,
+        "heldout_r2": r2,
+        "ablation_fidelity": ablation,
+        "ablation_top_k_distance": top_k,
+        "ablation_random_k_distance": random_k,
+        "plausibility_auc": _record_value(record, "plausibility_auc"),
+        "length_baseline_auc": _record_value(record, "length_baseline_auc"),
+        "failure_reasons": reasons,
+    }
+
+
+def _wilson_interval(successes: int, total: int, z_value: float = 1.96) -> tuple[float, float] | None:
+    """Wilson score interval for a binomial proportion (95% by default); `None` when `total == 0`."""
+    if total <= 0:
+        return None
+    p_hat = successes / total
+    denom = 1.0 + z_value**2 / total
+    centre = (p_hat + z_value**2 / (2 * total)) / denom
+    half = z_value * math.sqrt(p_hat * (1.0 - p_hat) / total + z_value**2 / (4 * total**2)) / denom
+    return max(0.0, centre - half), min(1.0, centre + half)
+
+
+def _pass_rate_entry(passes: int, applicable: int) -> dict[str, Any]:
+    """Pass count, applicable count, rate and Wilson 95% interval for one metric."""
+    interval = _wilson_interval(passes, applicable)
+    return {
+        "passed": passes,
+        "applicable": applicable,
+        "rate": (passes / applicable) if applicable else None,
+        "wilson_95": list(interval) if interval else None,
+    }
+
+
+def _per_metric_pass_rates(v1_audits: list[dict[str, Any]], v2_audits: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-metric and all-gates pass rates with Wilson 95% intervals for both suites."""
+    v1_rates = {
+        key: _pass_rate_entry(sum(1 for a in v1_audits if a[f"{key}_passed"]), len(v1_audits))
+        for key in ("auc", "consistency", "stability", "fidelity")
+    }
+    v1_rates["all_gates"] = _pass_rate_entry(sum(1 for a in v1_audits if a["passed"]), len(v1_audits))
+    v2_rates = {}
+    for gate in V2_GATES:
+        applicable = [a for a in v2_audits if a["outcomes"].get(gate) != "n/a"]
+        passes = sum(1 for a in applicable if a["outcomes"][gate] == "pass")
+        v2_rates[gate] = _pass_rate_entry(passes, len(applicable))
+    v2_rates["all_gates"] = _pass_rate_entry(sum(1 for a in v2_audits if a["passed"]), len(v2_audits))
+    return {"v1": v1_rates, "v2": v2_rates}
+
+
+def format_v2_validation_table(report: dict[str, Any]) -> str:
+    """Format the side-by-side v1 / v2 pass-rate table and the v2 per-dataset summary.
+
+    Args:
+        report: Report dictionary produced by `generate_validation_report`.
+
+    Returns:
+        str: Multi-line table.
+    """
+
+    def _rate(entry: dict[str, Any]) -> str:
+        """Render `passed/applicable (rate, 95% CI)` or `n/a`."""
+        if not entry.get("applicable"):
+            return "n/a"
+        low, high = entry["wilson_95"]
+        share = f"{100 * entry['rate']:.0f}%"
+        return f"{entry['passed']}/{entry['applicable']} ({share}, 95% CI {100 * low:.0f}-{100 * high:.0f}%)"
+
+    rates = report.get("pass_rates", {})
+    v1, v2 = rates.get("v1", {}), rates.get("v2", {})
+    lines = ["", "=" * 118, "TEST SUITE v1 vs v2 (per-metric pass rates, Wilson 95% intervals)", "=" * 118]
+    lines.append("v1 gates (as designed): AUC > 0.70, Consistency (1 - Spearman, 2 seeds) < 0.05,")
+    lines.append("    Stability (own answer) > 0.80, in-sample weighted R2 > 0.90.")
+    lines.append("v2 gates (owner-approved): Stability (base answer, original tokens) > 0.80,")
+    lines.append("    Consistency (1 - RBO, 5 seeds) < 0.05, held-out R2 > 0.90, ablation fidelity > 0.")
+    lines.append("    AUC is reported only (plausibility), with a model-free word-length baseline.")
+    lines.append("-" * 118)
+    for label, entry in (
+        ("v1 AUC", v1.get("auc", {})),
+        ("v1 Consistency", v1.get("consistency", {})),
+        ("v1 Stability", v1.get("stability", {})),
+        ("v1 Fidelity (R2)", v1.get("fidelity", {})),
+        ("v1 ALL FOUR", v1.get("all_gates", {})),
+        ("v2 Stability", v2.get("stability_v2", {})),
+        ("v2 Consistency", v2.get("consistency_v2", {})),
+        ("v2 Held-out R2", v2.get("heldout_r2", {})),
+        ("v2 Ablation > 0", v2.get("ablation", {})),
+        ("v2 ALL GATES", v2.get("all_gates", {})),
+    ):
+        lines.append(f"  {label:<20} {_rate(entry)}")
+    lines.append("-" * 118)
+    header = f"{'Dataset':<20} | {'Total':<6} | {'v1 passed':<9} | {'v2 passed':<9} | median AUC v2 / length baseline"
+    lines.append(header)
+    lines.append("-" * 118)
+    for ds, data in report.get("datasets", {}).items():
+        v2_audits = data.get("v2_samples", [])
+        aucs = [a["plausibility_auc"] for a in v2_audits if a.get("plausibility_auc") is not None]
+        bases = [a["length_baseline_auc"] for a in v2_audits if a.get("length_baseline_auc") is not None]
+        auc_str = f"{statistics.median(aucs):.3f} / {statistics.median(bases):.3f}" if aucs and bases else "n/a"
+        v2_passed = data.get("v2_passed_samples", 0)
+        lines.append(
+            f"{ds:<20} | {data['total_samples']:<6} | {data['passed_samples']:<9} | {v2_passed:<9} | {auc_str}"
+        )
+    lines.append("=" * 118)
+    lines.append("")
+    return "\n".join(lines)
 
 
 def generate_validation_report(
@@ -253,8 +448,11 @@ def generate_validation_report(
         "per_sample_records": serialized_per_sample,
     }
 
+    all_v1_audits: list[dict[str, Any]] = []
+    all_v2_audits: list[dict[str, Any]] = []
     for ds, recs in dataset_groups.items():
         sample_audits = []
+        v2_audits = [validate_sample_metrics_v2(rec, thresholds=thresh) for rec in recs]
         ds_detailed_records = []
         auc_fails = 0
         cons_fails = 0
@@ -305,11 +503,19 @@ def generate_validation_report(
             },
             "samples": sample_audits,
             "per_sample_records": ds_detailed_records,
+            "v2_samples": v2_audits,
+            "v2_passed_samples": sum(1 for a in v2_audits if a["passed"]),
         }
+        all_v1_audits.extend(sample_audits)
+        all_v2_audits.extend(v2_audits)
+
+    report["pass_rates"] = _per_metric_pass_rates(all_v1_audits, all_v2_audits)
+    report["v2_overall_passed_samples"] = sum(1 for a in all_v2_audits if a["passed"])
 
     if log_report:
         formatted_table = format_validation_summary_table(report)
         LOGGER.info("%s", formatted_table)
+        LOGGER.info("%s", format_v2_validation_table(report))
 
     return report
 

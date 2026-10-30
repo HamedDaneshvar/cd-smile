@@ -519,9 +519,10 @@ CombinedSampleArtifact = SampleArtifact
 
 # A new explainer means results from any earlier version (including the rejected v4.5.6) must never
 # be resumed from disk. v4.6.2 replaced the output distance by the teacher-forced response
-# log-likelihood drop, so only checkpoints written by v4.6.2 are accepted.
-PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.6.2"
-_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.2"}
+# log-likelihood drop; v4.6.3 adds test suite v2, whose metrics need the explained prompt and the
+# fitted design stored with each result, so only checkpoints written by v4.6.3 are accepted.
+PIPELINE_CHECKPOINT_SCHEMA_VERSION: Final[str] = "4.6.3"
+_VALID_CHECKPOINT_SCHEMA_VERSIONS = {"4.6.3"}
 
 
 def compute_experiment_fingerprint(

@@ -147,8 +147,8 @@ class BaseGroundTruthStrategy(ABC):
     """Abstract strategy defining binary ground-truth label assignment rules."""
 
     @abstractmethod
-    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
-        """Generate binary labels (1=relevant, 0=irrelevant) for tokens.
+    def raw_labels(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        """Generate the strategy's binary labels (1=relevant, 0=irrelevant), before any variance guard.
 
         Args:
             tokens_meta: List of token metadata objects.
@@ -157,7 +157,18 @@ class BaseGroundTruthStrategy(ABC):
         Returns:
             list[int]: Binary labels corresponding 1-to-1 with tokens_meta.
         """
-        pass
+
+    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        """Return `raw_labels` passed through `ensure_binary_variance` (the v1 test-suite labels).
+
+        Args:
+            tokens_meta: List of token metadata objects.
+            example: Raw dataset example dictionary containing labels and fields.
+
+        Returns:
+            list[int]: Binary labels corresponding 1-to-1 with tokens_meta.
+        """
+        return self.ensure_binary_variance(self.raw_labels(tokens_meta, example))
 
     @staticmethod
     def ensure_binary_variance(truth: list[int]) -> list[int]:
@@ -178,7 +189,7 @@ class ContentWordsStrategy(BaseGroundTruthStrategy):
     Template boilerplate (instructions, formatting labels) and stopwords are strictly 0.
     """
 
-    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+    def raw_labels(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
         truth: list[int] = []
         for meta in tokens_meta:
             if meta.role == TokenRole.TEMPLATE_BOILERPLATE.value:
@@ -187,7 +198,7 @@ class ContentWordsStrategy(BaseGroundTruthStrategy):
                 truth.append(1)
             else:
                 truth.append(0)
-        return self.ensure_binary_variance(truth)
+        return truth
 
 
 class GoalFocusedStrategy(BaseGroundTruthStrategy):
@@ -196,14 +207,14 @@ class GoalFocusedStrategy(BaseGroundTruthStrategy):
     All template boilerplate, options, and candidate solutions are labeled 0.
     """
 
-    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+    def raw_labels(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
         truth: list[int] = []
         for meta in tokens_meta:
             if meta.role == TokenRole.GOAL.value and meta.is_content:
                 truth.append(1)
             else:
                 truth.append(0)
-        return self.ensure_binary_variance(truth)
+        return truth
 
 
 class TargetAndAnswerStrategy(BaseGroundTruthStrategy):
@@ -212,7 +223,7 @@ class TargetAndAnswerStrategy(BaseGroundTruthStrategy):
     Template boilerplate, stopwords, and distractor options are labeled 0.
     """
 
-    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+    def raw_labels(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
         label_idx = example.get("label")
         target_sol_field: str | None = None
         if isinstance(label_idx, int) and label_idx in (0, 1, 2, 3):
@@ -228,15 +239,14 @@ class TargetAndAnswerStrategy(BaseGroundTruthStrategy):
                 truth.append(1)
             else:
                 truth.append(0)
-        return self.ensure_binary_variance(truth)
+        return truth
 
 
 class ScopedGoalStrategy(BaseGroundTruthStrategy):
     """Scoped Strategy: Labels content words within the focal target string as 1, stopwords as 0."""
 
-    def label_tokens(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
-        truth = [1 if meta.is_content else 0 for meta in tokens_meta]
-        return self.ensure_binary_variance(truth)
+    def raw_labels(self, tokens_meta: list[TokenMetadata], example: dict[str, Any]) -> list[int]:
+        return [1 if meta.is_content else 0 for meta in tokens_meta]
 
 
 def resolve_labeling_strategy(
@@ -276,6 +286,8 @@ class SampleGroundTruthRecord:
         full_prompt_roles: Semantic roles of each full prompt token.
         spans: Character spans of variable fields in the prompt.
         example: Original raw dataset sample record.
+        goal_truth_adjusted: Whether `ensure_binary_variance` changed a goal label (test-suite v2).
+        full_prompt_truth_adjusted: Whether it changed a full-prompt label (test-suite v2).
     """
 
     dataset_key: str
@@ -289,6 +301,8 @@ class SampleGroundTruthRecord:
     full_prompt_roles: list[str]
     spans: dict[str, tuple[int, int]]
     example: dict[str, Any]
+    goal_truth_adjusted: bool = False
+    full_prompt_truth_adjusted: bool = False
 
 
 class GroundTruthExtractor:
@@ -329,12 +343,14 @@ class GroundTruthExtractor:
             )
             for i, t in enumerate(goal_tokens)
         ]
-        goal_truth = self.scoped_strategy.label_tokens(dummy_goal_meta, example)
+        goal_raw = self.scoped_strategy.raw_labels(dummy_goal_meta, example)
+        goal_truth = self.scoped_strategy.ensure_binary_variance(goal_raw)
 
         full_tokens_meta = TokenSpanMapper.map_prompt_tokens(prompt_text, spans)
         full_prompt_tokens = [m.token for m in full_tokens_meta]
         full_prompt_roles = [m.role for m in full_tokens_meta]
-        full_prompt_truth = self.full_prompt_strategy.label_tokens(full_tokens_meta, example)
+        full_raw = self.full_prompt_strategy.raw_labels(full_tokens_meta, example)
+        full_prompt_truth = self.full_prompt_strategy.ensure_binary_variance(full_raw)
 
         return SampleGroundTruthRecord(
             dataset_key=dataset_name,
@@ -348,6 +364,8 @@ class GroundTruthExtractor:
             full_prompt_roles=full_prompt_roles,
             spans=spans,
             example=example,
+            goal_truth_adjusted=goal_truth != goal_raw,
+            full_prompt_truth_adjusted=full_prompt_truth != full_raw,
         )
 
 
@@ -547,6 +565,8 @@ def inspect_and_generate_ground_truth(
                 "full_prompt": record.full_prompt_text,
                 "full_tokens": record.full_prompt_tokens,
                 "full_truth": record.full_prompt_truth,
+                "truth_adjusted": record.goal_truth_adjusted,
+                "full_truth_adjusted": record.full_prompt_truth_adjusted,
             }
 
     return GroundTruthResult(
@@ -575,6 +595,10 @@ class GroundTruthAnnotation:
         full_tokens: Explicit list of tokens corresponding to full_truth.
         is_scoped: Boolean indicator of whether this annotation view is scoped or full prompt.
         perturbation_mode: PerturbationMode associated with this annotation view.
+        truth_adjusted: Whether `truth` contains a label invented by `ensure_binary_variance` or a
+            fallback (all-ones labels for unmatched importance tokens); test-suite v2 reports AUC as
+            missing for such views.
+        full_truth_adjusted: Same flag for `full_truth`.
     """
 
     dataset_key: str
@@ -588,6 +612,8 @@ class GroundTruthAnnotation:
     full_tokens: list[str] = field(default_factory=list)
     is_scoped: bool = True
     perturbation_mode: PerturbationMode = PerturbationMode.GOAL
+    truth_adjusted: bool = False
+    full_truth_adjusted: bool = False
 
     def __post_init__(self) -> None:
         """Validate binary ground-truth labels and token list lengths upon initialization.
@@ -637,6 +663,8 @@ class GroundTruthAnnotation:
             full_tokens=list(self.full_tokens),
             is_scoped=True,
             perturbation_mode=PerturbationMode.GOAL,
+            truth_adjusted=self.truth_adjusted,
+            full_truth_adjusted=self.full_truth_adjusted,
         )
 
     def get_full_prompt_annotation(self) -> GroundTruthAnnotation:
@@ -660,6 +688,8 @@ class GroundTruthAnnotation:
             full_tokens=list(self.full_tokens),
             is_scoped=False,
             perturbation_mode=PerturbationMode.FULL_PROMPT,
+            truth_adjusted=self.full_truth_adjusted if self.full_truth else self.truth_adjusted,
+            full_truth_adjusted=self.full_truth_adjusted,
         )
 
     def get_importance_words_annotation(
@@ -711,7 +741,8 @@ class GroundTruthAnnotation:
                 else:
                     dynamic_truth.append(0)
 
-        if len(dynamic_truth) != len(importance_tokens):
+        fallback_used = len(dynamic_truth) != len(importance_tokens)
+        if fallback_used:
             dynamic_truth = [1] * len(importance_tokens)
 
         return GroundTruthAnnotation(
@@ -726,6 +757,10 @@ class GroundTruthAnnotation:
             full_tokens=list(self.full_tokens),
             is_scoped=True,
             perturbation_mode=PerturbationMode.IMPORTANCE_WORDS,
+            truth_adjusted=fallback_used or (
+                self.full_truth_adjusted if (self.full_truth and norm_full) else self.truth_adjusted
+            ),
+            full_truth_adjusted=self.full_truth_adjusted,
         )
 
     def for_scope(
@@ -816,6 +851,8 @@ class GroundTruthRegistry:
                         full_tokens=payload.get("full_tokens", []),
                         is_scoped=True,
                         perturbation_mode=PerturbationMode.GOAL,
+                        truth_adjusted=bool(payload.get("truth_adjusted", False)),
+                        full_truth_adjusted=bool(payload.get("full_truth_adjusted", False)),
                     )
                 )
                 count += 1
@@ -877,6 +914,8 @@ class GroundTruthRegistry:
             full_tokens=record.full_prompt_tokens,
             is_scoped=True,
             perturbation_mode=PerturbationMode.GOAL,
+            truth_adjusted=record.goal_truth_adjusted,
+            full_truth_adjusted=record.full_prompt_truth_adjusted,
         )
         self.register(ann)
         return ann
@@ -964,6 +1003,8 @@ class GroundTruthRegistry:
                                 full_tokens=payload.get("full_tokens", []),
                                 is_scoped=True,
                                 perturbation_mode=PerturbationMode.GOAL,
+                                truth_adjusted=bool(payload.get("truth_adjusted", False)),
+                                full_truth_adjusted=bool(payload.get("full_truth_adjusted", False)),
                             )
                         )
                         count += 1
@@ -991,6 +1032,8 @@ class GroundTruthRegistry:
                     "full_prompt": ann.full_prompt,
                     "full_tokens": ann.full_tokens,
                     "full_truth": ann.full_truth,
+                    "truth_adjusted": ann.truth_adjusted,
+                    "full_truth_adjusted": ann.full_truth_adjusted,
                 }
         p = Path(json_path)
         p.parent.mkdir(parents=True, exist_ok=True)
@@ -1062,10 +1105,10 @@ def align_ground_truth_with_features(
     annotation: GroundTruthAnnotation,
     feature_names: list[str] | Any,
 ) -> tuple[list[int] | None, bool, str]:
-    """Explicitly align ground-truth binary labels with XWhy explanation feature names.
+    """Explicitly align ground-truth binary labels with XWhy explanation feature names (test suite v1).
 
     Validates lengths and verified normalized token correspondence. Rejects count-only
-    matches on unrelated token sequences.
+    matches on unrelated token sequences. Features without an annotated counterpart are labelled 0.
 
     Args:
         annotation: Ground-truth annotation.
@@ -1073,6 +1116,29 @@ def align_ground_truth_with_features(
 
     Returns:
         tuple[list[int] | None, bool, str]: (aligned_truth, is_aligned, diagnostic_notes).
+    """
+    labels, is_aligned, notes = align_ground_truth_strict(annotation, feature_names)
+    if labels is None:
+        return None, is_aligned, notes
+    return [0 if label is None else int(label) for label in labels], is_aligned, notes
+
+
+def align_ground_truth_strict(
+    annotation: GroundTruthAnnotation,
+    feature_names: list[str] | Any,
+) -> tuple[list[int | None] | None, bool, str]:
+    """Align ground-truth labels with explanation features, leaving unannotated features unlabelled.
+
+    Same matching rules as `align_ground_truth_with_features`, but a feature outside the
+    annotated block, or one that the token-overlap rule could not match, is returned as `None`
+    instead of being labelled irrelevant (test-suite v2 scores only labelled features).
+
+    Args:
+        annotation: Ground-truth annotation.
+        feature_names: Feature names returned in the XWhy explanation result.
+
+    Returns:
+        tuple[list[int | None] | None, bool, str]: (labels or None per feature, is_aligned, notes).
     """
     if feature_names is None:
         return None, False, "Explanation returned None feature names."
@@ -1105,7 +1171,7 @@ def align_ground_truth_with_features(
     if n_feat > n_ann and n_ann > 0:
         for start in range(n_feat - n_ann + 1):
             if norm_feat[start : start + n_ann] == norm_ann:
-                padded_truth = [0] * n_feat
+                padded_truth: list[int | None] = [None] * n_feat
                 for j in range(n_ann):
                     padded_truth[start + j] = ann_truth[j]
                 return (
@@ -1126,7 +1192,7 @@ def align_ground_truth_with_features(
                 )
 
     # 3. Verified token-overlap alignment (requires >= 80% of explanation features to match annotated tokens)
-    aligned_truth: list[int] = []
+    aligned_truth: list[int | None] = []
     matched_count = 0
     used_ann_indices: set[int] = set()
 
@@ -1142,7 +1208,7 @@ def align_ground_truth_with_features(
             used_ann_indices.add(found_idx)
             matched_count += 1
         else:
-            aligned_truth.append(0)
+            aligned_truth.append(None)
 
     feat_coverage = matched_count / len(feature_names) if feature_names else 0.0
     ann_coverage = matched_count / len(ann_tokens) if ann_tokens else 0.0

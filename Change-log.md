@@ -1,6 +1,6 @@
-# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.6.2`)
+# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.6.3`)
 
-This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.6.2`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
+This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.6.3`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
 
 ---
 
@@ -29,7 +29,8 @@ This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Ex
 | **`v4.5.6`** | 8-File Modular DAG (Targeted `xwhy_core.py` Upgrade) | Three-Band Tie-Free Affine Scaling, Universal `surface_spec` + `w_rep`, `1.65` Domain-Noun Rescue & Proportional `tau = mu_raw.copy()` | Upgraded **only `xwhy_core.py`**: computed `surface_spec` and `len_factor` for all tokens (including `len <= 2`), rescued 5+ letter domain nouns (`"group"`) at `best_rank >= 150 and max_vec_norm >= 1.65`, applied occurrence decay `w_rep` to all tokens before `span_mask_local`/`is_short_or_low_info` checks, replaced flat-ceiling clamping with 3-band tie-free affine scaling (`[0.25, 1.00]`, `[0.0012, 0.0065]`, `[0.00002, 0.00025]`), and set `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` so `delta_b = tau * gamma_d` scales as $O(\tau_j^2)$. | **Rejected (Failed Integrity Audit, 2026-10-29):** Row-index kernel collapse (`d_coal_loc`, `sigma_loc` down to `0.26`), `r1 = min(0.035, 1/K)` multiplicative box around a static prior, response-dependent kernel factor `(d_scaled / 0.90)^2`, `r2_try >= 0.935` threshold-seeking stopping rule, and span-mask down-weighting of template tokens to `[2e-5, 2.5e-4]` in `full_prompt` mode. Documented in Section 19. |
 | **`v4.6.0`** | 8-File Modular DAG (`xwhy_core.py` rewrite; budget/schema/bug-fix alignment in `xwhy_metrics.py`, `xwhy_multimodel_pipeline.py`, `xwhy_providers.py`) | Legitimate, full-data, full-prompt surrogate | Product perturbation measure `q = 1/(K+1)` (simulation-guided, disclosed); KernelSHAP complete-stratum rule for every stratum incl. single-token occlusions (complete up to `K ≈ 223` at `M = 384`); identity-keyed CRN sampling with no duplicates and no salience-driven design; layout-preserving token deletion; mask-only post-stratified kernel with collapsed sparse strata; weighted least squares on all rows; heteroscedastic empirical-Bayes shrinkage of sampled-coalition corrections toward the LLM's exact occlusion effects; GCV ridge for longer scopes; ceiling `384` aligned across baseline, Stability and Consistency; Word2Vec prior, span masks, trust-region box and output stopword filter removed; `importance_words` Stability index bug and checkpoint-schema reuse fixed. | **Superseded by `v4.6.1`.** First real Kaggle run (gemma2:2b, `mmlu` `goal`, 1 sample) completed without errors but missed 3 of 4 thresholds; a third independent audit found that scopes of 224+ words left tokens never deleted (zero attribution). Section 25. |
 | **`v4.6.1`** | Same as `v4.6.0` | Post-release review fixes | One output-distance blend for identical and changed responses; balanced permutation-stream design for long scopes so every token is deleted at least once, with a coverage floor on `q` above ~603 words; estimator name reported per branch; least-recently-written snapshot eviction; `importance_words` Stability reported as missing instead of a partial mean; checkpoint schema `4.6.1`. | **Superseded by `v4.6.2`.** Kaggle coverage run, all 6 datasets × 3 modes: 0/6 pass in every mode (25.4). |
-| **`v4.6.2` (Current)** | Same as `v4.6.0`; additive Ollama prefill call in `xwhy_providers.py`; Stability/ablation guards in `xwhy_metrics.py` | Explain the model's likelihood of its own answer | Response distance = teacher-forced log-likelihood drop of the original response, `log p(y|x) − log p(y|x~)` (ContextCite/AttriBoT target; the ESCI paper's energy of a fixed target response with the LLM as the energy), assembled from the row's greedy generation plus `/api/chat` assistant-prefill continuations; one measure per sample (`response_measure`); text distance kept for providers without logprobs/prefill; Stability missing when any variation fails; bounded, NaN-safe ablation score; checkpoint schema `4.6.2`. | Offline on 24 real gemma2:2b samples: goal 1/18 pass (was 0/18), full prompt 0/6 with median R² 0.93 (was 0.72–0.79) and Stability 0.74 (was 0.55). Remaining failures traced to model behaviour and ground-truth definitions (26.6). Thresholds are **not** met on most samples. |
+| **`v4.6.2`** | Same as `v4.6.0`; additive Ollama prefill call in `xwhy_providers.py`; Stability/ablation guards in `xwhy_metrics.py` | Explain the model's likelihood of its own answer | Response distance = teacher-forced log-likelihood drop of the original response, `log p(y|x) − log p(y|x~)` (ContextCite/AttriBoT target; the ESCI paper's energy of a fixed target response with the LLM as the energy), assembled from the row's greedy generation plus `/api/chat` assistant-prefill continuations; one measure per sample (`response_measure`); text distance kept for providers without logprobs/prefill; Stability missing when any variation fails; bounded, NaN-safe ablation score; checkpoint schema `4.6.2`. | Offline on 24 real gemma2:2b samples: goal 1/18 pass (was 0/18), full prompt 0/6 with median R² 0.93 (was 0.72–0.79) and Stability 0.74 (was 0.55). Remaining failures traced to model behaviour and ground-truth definitions (26.6). Thresholds are **not** met on most samples. |
+| **`v4.6.3` (Current)** | Same as `v4.6.2` (explanations unchanged); test code in `xwhy_metrics.py`, `xwhy_tables.py`, `xwhy_ground_truth.py` | Test suite v2, owner-approved after the three-agent review, reported side by side with v1 | AUC reported only (plausibility, missing when undefined, with a model-free length baseline); Stability explains the base answer in every variant and compares original tokens by position; Consistency = 1 − RBO over 5 seeds, n/a for seed-free designs; held-out R² with evaluator weights; ablation > 0 gated; pass rates with Wilson intervals; silent fallbacks removed; schema `4.6.3`. | Offline on 24 recorded samples: the length baseline beats the explainer on AUC (median 1.000 / 0.847 vs 0.600 / 0.590); held-out R² goal median 0.188, full 0.836; Stability v2 still < 0.80 where computable. Independent review: 1 Critical + 3 Major fixed before commit. End-to-end v2 pending Kaggle quota (27.6). |
 
 ---
 
@@ -1044,3 +1045,121 @@ None of them changed anything. They read the code, the brief and this Change-log
 6. Fix the silent fallbacks listed above.
 
 These are decisions for the test owner. The explainer work in this section leaves every test, threshold and ground-truth rule unchanged.
+
+---
+
+## 27. `v4.6.3`: Test Suite v2, Owner-Approved, Reported Side by Side with v1 (2026-10-30)
+
+### 27.1 Decision and scope
+
+After the debate in 26.14, the test owner (Koorosh) asked for the judge's corrections to be implemented ("Yes, fix tests").
+- The v1 tests are kept exactly as designed. Every report shows v1 and v2 side by side, so no earlier verdict is lost.
+- v2 changes what each test measures; the threshold values are kept.
+- **The explanation of a prompt is unchanged** (same response measure, design and estimator as `a950173`). `xwhy_core.py` changed in two ways only:
+  - it stores the explained prompt, answer and fitted design with each result;
+  - it can explain a fixed target answer inside an `explanation_target` block, which only v2 Stability uses.
+- With `compute_test_suite_v2=False`, the v1 metrics are bit-identical, as checked by the smoke test.
+
+**Waiver recorded at the owner's request.** Brief III.5 ("Never strip or hunt for injected stability tokens") and DO-NOT-REPEAT #67 ("re-targeting Stability variants to the baseline's response") guard the *explainer* against gaming Stability.
+- In v2, the *test* does both. It knows where it inserted the filler, so it compares only the original tokens, and it explains the base answer in every variant.
+- The explainer itself still never sees, strips or targets filler tokens.
+- #67 is amended accordingly: it forbids the explainer or its estimator from doing this, not an owner-approved test definition. That test definition is reported next to v1 and closes its own loophole with a filler-share gate (27.2).
+
+### 27.2 What each test measures
+
+| Test | v1 (unchanged, still reported) | v2 (new) |
+| :--- | :--- | :--- |
+| AUC | Gate: > 0.70 on lexical labels; invented labels and full-prompt projection allowed | **Reported, not gated** (plausibility). `None` when a label was invented by the single-class guard or a fallback (`truth_adjusted`), the scope is single-class, or features are unannotated (`align_ground_truth_strict` leaves them unlabelled instead of 0). A model-free word-length scorer is reported on the same labels as a baseline (`length_baseline_auc`). |
+| Stability | Mean Ruzicka of L1-normalised \|coef\| over 7 filler variants; each variant explains its own answer; keys `name#occurrence` | Each variant explains the **base prompt's answer** (`explanation_target`: teacher-forced drop of the base answer under the variant's prompts, or text distance to the base answer). Only the original tokens are compared, aligned by the known insertion position and renormalised. Gate: **mean similarity > 0.80 and mean filler share < (1 − 0.80)/(1 + 0.80) = 1/9**, the total-variation bound the 0.80 Ruzicka threshold implies, so attribution moved onto the filler still fails. A failed variant, an inactive target or an all-zero explanation makes the score missing. |
+| Consistency | 1 − Spearman over all tokens, seeds 42 and 43; passes automatically for seed-free designs | Mean pairwise 1 − rank-biased overlap over 5 seeds (p = 0.9, truncated at depth K and renormalised by 1 − pᴷ). It is top-weighted by design: the top 10 ranks carry about 65% of the weight, so reordering among negligible tokens costs little, and v1's Spearman over all tokens is still reported. **Not applicable** when the design does not depend on the seed (checked with the design generator); **missing** when the baseline attributes nothing. Gate < 0.05. |
+| Fidelity | In-sample weighted R² with the explainer's own kernel, > 0.90 | **Held-out R²**. The baseline and every single-deletion row stay in every training fold, so each fold refits the same estimator branch the explanation used. The multi-deletion rows (2+ deletions) are split into 5 folds stratified by deletion count, predicted from the other rows, and scored with evaluator-fixed weights (equal total weight per deletion count), not the explainer's kernel. Not applicable for K ≤ 3 or fewer than 10 multi-deletion rows. Gate > 0.90. |
+| Faithfulness | Top-k vs bottom-k ablation reported, not gated | **Gate:** ablation fidelity > 0 **and** the top-k deletion changes the explained answer more than the mean k-deletion row of the design (random-k null; comprehensiveness, DeYoung et al., ACL 2020). The null is skipped when the design has no k-deletion rows. |
+| Pass rule | All four per sample; a dataset passes only if every sample does | All applicable v2 gates per sample. Not-applicable gates (explicit `*_status` fields) are skipped; an applicable gate with a missing value fails. Reported with **per-metric pass rates and Wilson 95% intervals for both suites** (`format_v2_validation_table`). |
+
+**Defects fixed, which also affect v1 where noted:**
+- **AUC returns missing instead of a silent value.** `evaluate_token_auc` returns `None` instead of 0.5 on a length mismatch or empty labels (v1).
+- **Identical vectors agree.** v1 Consistency now checks equality before the zero-variance test, so identical uniform vectors give ρ = 1. All-zero vectors still give 0, as before.
+- **Ablation keeps the layout.** Prompts use `_delete_tokens_preserving_layout` instead of `" ".join`, which had removed every newline. This changes the reported ablation value, which was never a v1 gate.
+- **No ambiguous distance fallback.** The v1 audit no longer reads the `consistency` key, which could hold either ρ or a distance, so a ρ of 0.02 can no longer pass as a distance (`xwhy_tables.py`).
+- **Invented labels are flagged.** Ground-truth strategies expose `raw_labels`, and the variance guard's effect is recorded (`truth_adjusted`, `full_truth_adjusted`), including the all-ones fallback and the goal-label branch for importance tokens. Registry JSON written before 4.6.3 has no flags and is read as unadjusted. v1 labels are unchanged.
+- **Results carry their inputs.** `ScopedXWhyResult` stores `original_output` and `raw_data` (`original_prompt`, `fit_masks`, `fit_distances`, `design_size`, `y_target`, `weights`); the patched `explain` path stores the same keys. The memory reclaim strips the arrays after evaluation. Checkpoint schema `4.6.3`.
+
+**A finding while building v2.** The usual extrapolated RBO cannot be used for complete short rankings. Its residual term pᴷ assumes agreement beyond depth K, so a fully reversed 4-token ranking scores 0.78. The truncated, renormalised form scores 1 for identical rankings and about 0.37 for that reversal.
+
+### 27.3 Independent review of the v2 diff, and fixes
+
+A reviewer agent, read-only and given the diff, the brief and the Change-log, confirmed:
+- v1 behaviour, `None` handling in every consumer and memo-key separation are correct;
+- RBO and the Wilson interval are correct (re-implemented independently);
+- `explanation_target` is restored in a `finally` block and cleared per sample.
+
+It found one Critical, three Major and several Minor issues. All were fixed before the commit:
+
+| Severity | Finding | Fix |
+| :--- | :--- | :--- |
+| Critical | 5-fold CV held out single-deletion rows, so folds refitted GCV ridge instead of the explanation's estimator | Baseline and single-deletion rows always in training; only multi-deletion rows held out, stratified by count |
+| Major | Stability v2 conflicts with brief III.5 and #67; the ungated filler share was a loophole | Owner waiver recorded and #67 amended (27.1); filler share < 1/9 is part of the gate |
+| Major | The ablation gate is close to a tautology for short scopes (ablated prompts are design rows) | Random-k null added: top-k must beat the mean k-deletion row |
+| Major | RBO p = 0.9 ignores the tail at large K | Documented as intended top-weighting with its effective depth; v1 Spearman stays reported |
+| Minor | A v2 exception could discard the whole sample, including v1 | Every v2 metric is contained (`try` / explicit status) |
+| Minor | All-zero explanations scored 1.0 in Stability v2 and RBO | Reported missing |
+| Minor | The filler matched the first equal token | Insertion position passed by the caller |
+| Minor | Conditioned runs repeated prefill work when the answer was unchanged; memo too small; no switch | Shared values when the variant's answer equals the base answer; memo 8,192; `compute_test_suite_v2` flag |
+| Minor | `explanation_target` was a silent no-op without provider state | It now yields whether it is active; inactive means missing |
+| Minor | The conditioned text distance lost the logprob blend after snapshot turnover | The base first-token distribution is pinned for the sample |
+| Minor | Censoring of the targeted base term was documented in the wrong direction | Documentation corrected: it can overstate a row's drop; the unperturbed row stays 0 |
+| Minor / Nit | n/a decided from note text, upper median, missing docstrings, `fit_masks` not stripped, `design_size` | Explicit statuses, `statistics.median`, docstrings, reclaim strips the arrays, stored `design_size` |
+
+### 27.4 Verification
+
+- `ast.parse` under `-W error` succeeds, and `pyflakes` reports no new issue in any edited file (0 in `xwhy_core.py`).
+- **v1 regression.** With the patched ground-truth module, the six full-prompt AUCs of the Kaggle coverage run are reproduced exactly (0.4970, 0.4352, 0.4803, 0.3217, 0.5403, 0.9167).
+- **Stubbed end-to-end smoke test** (real modules, toy language model). Every `v4.6.2` check still passes, plus:
+  - invented and single-class labels give a missing v2 AUC, unannotated features stay unlabelled, and v1 labels are unchanged;
+  - RBO is correct;
+  - seed-free designs are detected;
+  - Stability v2 aligns by the insertion position, including a duplicate "please";
+  - all-zero explanations give missing;
+  - under `explanation_target` the drop equals the exact log p(base answer) drop under the variant's prompts to 1e-9, with the target restored;
+  - a full GOAL-mode sample runs through `evaluate_sample_comprehensively` with all v1 and v2 fields, statuses and the random-k null;
+  - **v1 metrics are identical with v2 on and off**;
+  - the side-by-side report and pass rates are produced;
+  - not-applicable gates are skipped and missing values fail;
+  - filler-heavy explanations fail Stability v2, and a top-k deletion below the random-k mean fails the ablation gate;
+  - the Wilson interval is correct, and the ρ-as-distance fallback is gone.
+
+### 27.5 v1 vs v2 on the recorded gemma2:2b data (offline, likelihood signal, repository metric code)
+
+These figures use the same 18 goal and 6 full-prompt samples. Parts of v2 need new model calls, which were not possible because the Kaggle GPU quota was exhausted:
+- **Stability v2** is computable only where all 7 variants keep the base answer. There the conditioned run equals the variant's own run.
+- **Consistency v2** uses the 2 recorded seeds as a proxy for 5.
+- **Ablation and its random-k null** are pending.
+
+| Mode | v1 all four | v2 AUC median (length baseline) | v2 held-out R² > 0.90 (median) | v2 Consistency < 0.05 (2-seed proxy) | v2 Stability computable / > 0.80 |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| goal (18) | 1/18 | 0.600 (**1.000**) | 0/17 (0.188) | 4/8 applicable (10 seed-free) | 4/18 / 0 (0.51–0.73) |
+| full prompt (6) | 0/6 | 0.590 (**0.847**) | 1/6 (0.836) | 2/5 applicable | 0/6 / – |
+
+Readings:
+- **AUC cannot be a gate.** The model-free word-length scorer beats the explainer on the lexical labels in every mode.
+- **Top-weighted Consistency is more lenient on tail noise than Spearman.** In full-prompt mode, 2 of the 5 applicable samples pass, against 0 of 5 for Spearman (v1 distances 0.12–0.61).
+- **Held-out fidelity on multi-token deletions is the hardest test.** In goal mode a single deleted word can flip the answer, so an additive surrogate that fits the single-deletion neighbourhood (v1 in-sample median 0.652) predicts multi-deletion rows poorly (median 0.188; negative for 7 samples). In full-prompt mode it holds for most samples (median 0.836). boolq at K = 234 is the exception: −1.17 held-out vs 0.78 in-sample.
+- **Stability stays below 0.80 even when the answer does not change.** The four computable goal samples score 0.721, 0.731, 0.543 and 0.514, against v1 0.694, 0.718, 0.525 and 0.486. The filler reshapes how gemma2 responds to deletions (26.6), not only which answer it gives.
+
+### 27.6 Not yet run, and cost
+
+- End-to-end v2 runs in all three modes are pending: conditioned Stability for the 20 samples where a filler changes the answer, 5-seed Consistency, and ablation with its random-k null. They need the pipeline at this commit; the kernels are prepared for when the Kaggle quota resets.
+- **v2 cost per sample**, in addition to v1:
+  - 7 conditioned Stability runs: generations are cached; prefill calls are made only where a variant's answer differs from the base answer.
+  - 3 extra seeds for Consistency: the 4th, seed 43, repeats v1's run from cache.
+
+  All of it is switched off with `compute_test_suite_v2=False`.
+
+### 27.7 New "DO NOT REPEAT" guardrails (#69 – #72), and #67 amended
+
+- **#67, amended:** the explainer and its estimator must never re-target Stability variants or strip filler tokens. An owner-approved *test* definition may (27.1), when it is reported next to v1 and gates the filler share.
+
+69. **DO NOT REPEAT (`v4.6.3` review): Gating on a metric that a model-free baseline passes.** Report a baseline next to any plausibility metric (here the word-length AUC) and keep such metrics out of the pass rule.
+70. **DO NOT REPEAT (`v4.6.3` review): Making up a score when a test is undefined.** Single-class labels, invented labels, projections onto a different scope, all-zero explanations and silent 0.5 or 0 fallbacks must give "missing" or "not applicable", never a number.
+71. **DO NOT REPEAT (`v4.6.3` finding): Extrapolated RBO on complete short rankings.** Truncate at the list length and renormalise by 1 − pᴷ.
+72. **DO NOT REPEAT (`v4.6.3` review): Cross-validating an estimator on folds that remove the rows it is anchored on.** Keep the baseline and single-deletion rows in every training fold, or the held-out score measures a different estimator.

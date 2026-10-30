@@ -6,7 +6,8 @@ Imports from sibling modules: `.xwhy_env`, `.xwhy_providers`.
 """
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+import contextlib
 from dataclasses import dataclass, field
 import gc
 import hashlib
@@ -111,9 +112,10 @@ _LOGPROB_SNAPSHOT_RETAIN: Final[int] = 768
 _SEQUENCE_SNAPSHOT_CAPACITY: Final[int] = 1536
 _SEQUENCE_SNAPSHOT_RETAIN: Final[int] = 1152
 # v4.6.2: per-sample memo of log-likelihood drops, sized for every row of a sample's runs (baseline,
-# 7 Stability variants, Consistency re-run: 9 x 384 = 3456), so a re-run never recomputes a value.
-_LOG_LIKELIHOOD_MEMO_CAPACITY: Final[int] = 4096
-_LOG_LIKELIHOOD_MEMO_RETAIN: Final[int] = 3584
+# 7 Stability variants, Consistency re-run, and with test suite v2 the 7 conditioned variants and 3 more
+# seeds: 19 x 384 = 7296), so a re-run never recomputes a value.
+_LOG_LIKELIHOOD_MEMO_CAPACITY: Final[int] = 8192
+_LOG_LIKELIHOOD_MEMO_RETAIN: Final[int] = 7424
 # v4.6.2: response measure fixed per sample (recorded as `response_measure` with every explanation).
 _LOG_LIKELIHOOD_MEASURE: Final[str] = "log_likelihood_drop"
 _TEXT_DISTANCE_MEASURE: Final[str] = "text_distance"
@@ -414,32 +416,97 @@ def _active_response_measure(explainer: Any) -> str:
     return str(state.get("measure", _TEXT_DISTANCE_MEASURE)) if state else _TEXT_DISTANCE_MEASURE
 
 
+@contextlib.contextmanager
+def explanation_target(explainer: Any, target_prompt: str, target_output: str) -> Iterator[bool]:
+    """Explain the response `target_output` of `target_prompt` in every explanation run in the block.
+
+    Test-suite v2 Stability (owner-approved): each filler variant must explain the base prompt's
+    answer, so the response the variant's explanation measures is fixed to the base answer.
+    - Log-likelihood drop: `log p(y | x') - log p(y | x~')` with `y` the base answer, `x'` the
+      variant's unperturbed prompt and `x~'` its design rows.
+    - Text distance: every row is compared with the base answer text.
+
+    Args:
+        explainer: Active explainer (provider holds the per-sample state).
+        target_prompt: Unperturbed prompt of the base explanation, exactly as its explanation used it.
+        target_output: Base answer text.
+
+    Yields:
+        bool: Whether the target is active (the provider holds per-sample state); a caller must not
+            report a run as conditioned when this is False. The previous target is restored afterwards.
+    """
+    provider = getattr(getattr(explainer, "state", None), "provider", None) if explainer is not None else None
+    store = _provider_dict(provider, "_xwhy_explanation_target") if provider is not None else None
+    previous = dict(store) if store is not None else {}
+    if store is not None:
+        store.clear()
+        store.update(prompt=str(target_prompt), output=str(target_output))
+    try:
+        yield store is not None
+    finally:
+        if store is not None:
+            store.clear()
+            store.update(previous)
+
+
+def _active_explanation_target(explainer: Any, original_prompt: str) -> tuple[str, str] | None:
+    """Return the active `(target_prompt, target_output)` unless it is this explanation's own prompt."""
+    provider = getattr(getattr(explainer, "state", None), "provider", None) if explainer is not None else None
+    store = getattr(provider, "_xwhy_explanation_target", None) if provider is not None else None
+    if not isinstance(store, dict) or not store.get("prompt") or store["prompt"] == original_prompt:
+        return None
+    return str(store["prompt"]), str(store.get("output", ""))
+
+
+def _log_likelihood_under(explainer: Any, sequence: LogprobSequence, record: _RecordedResponse) -> float | None:
+    """Teacher-forced `log p(sequence | prompt of record)`, continuing under the record's queried prompt."""
+    continue_fn = explainer.state.provider.continue_with_logprobs
+    model_name = str(getattr(getattr(explainer, "config", None), "model_name", "") or "")
+
+    def _continue_from(prefix: str, max_tokens: int) -> LogprobSequence | None:
+        """Continue the prefilled prefix under the record's own queried prompt."""
+        return continue_fn(
+            prompt=record.queried_prompt, assistant_prefix=prefix, model=model_name, max_tokens=max_tokens
+        )
+
+    return _teacher_forced_log_likelihood(sequence, record.sequence, _continue_from)
+
+
 def _response_log_likelihood_drop(
     explainer: Any,
     original_prompt: str,
     perturbed_prompt: str,
     original_output: str,
 ) -> float | None:
-    r"""Drop $\log p(y \mid x) - \log p(y \mid \tilde{x})$ of the original response $y$ (`v4.6.2`).
+    r"""Drop $\log p(y \mid x) - \log p(y \mid \tilde{x})$ of the explained response $y$ (`v4.6.2`).
+
+    $y$ is the original response of the explanation (`original_prompt`), or the base answer while
+    an `explanation_target` is active (test-suite v2 Stability; then $x$ is still this
+    explanation's unperturbed prompt and $\log p(y \mid x)$ is teacher-forced too). When the
+    explanation's own answer has the same tokens as the base answer, the targeted values equal the
+    untargeted ones and are shared with them. Censoring (`_teacher_forced_log_likelihood`) bounds
+    each teacher-forced term from above; under a target the base term $\log p(y \mid x)$ can be
+    censored too, so there a row's drop can be overstated by the base term's censoring, while the
+    unperturbed row stays exactly 0.
 
     The response measure is fixed once per sample, at its first distance (the baseline run): the
     log-likelihood drop when that run's original is scorable (`_pinned_original`), else the text
-    distance. Every later explanation of the sample (Stability variants, the Consistency re-run,
-    the ablation check) uses the same measure; an original that cannot be scored under a sample
-    fixed to the drop yields `NaN` rows (the explanation fails and its metric is reported
+    distance. Every later explanation of the sample (Stability variants, the Consistency re-runs,
+    the ablation check) uses the same measure; an explained response that cannot be scored under
+    a sample fixed to the drop yields `NaN` rows (the explanation fails and its metric is reported
     missing), never a switch to the text distance. Values are memoised per sample, so a prompt
-    repeated by the Consistency re-run costs no further calls. The drop compares the model's own
-    output distribution on the original response, never prompt text.
+    repeated by a re-run costs no further calls. The drop compares the model's own output
+    distribution on the explained response, never prompt text.
 
     Args:
         explainer: Active explainer (provider, model name, temperature).
-        original_prompt: Unperturbed prompt as seen by the explainer.
+        original_prompt: Unperturbed prompt of this explanation, as seen by the explainer.
         perturbed_prompt: Perturbed prompt as seen by the explainer.
         original_output: Response text of the unperturbed prompt.
 
     Returns:
         float | None: The drop (0 for the unperturbed prompt); `NaN` for an invalid row (missing
-            generation, failed continuation, or an unscorable original in a sample fixed to the
+            generation, failed continuation, or an unscorable response in a sample fixed to the
             drop); `None` when the sample uses the text distance.
     """
     state = _response_measure_state(explainer)
@@ -447,32 +514,45 @@ def _response_log_likelihood_drop(
         return None
     provider = explainer.state.provider
     model_name = str(getattr(getattr(explainer, "config", None), "model_name", "") or "")
+    target = _active_explanation_target(explainer, original_prompt)
+    if target is not None:
+        own = _lookup_recorded_response(explainer, original_prompt)
+        base = _pinned_original(explainer, target[0], target[1])
+        if own is not None and base.record is not None and [t for t, _l, _a in own.sequence] == [
+            t for t, _l, _a in base.record.sequence
+        ]:
+            target = None
+    explained_prompt, explained_output = target if target is not None else (original_prompt, original_output)
     memo = _provider_dict(provider, "_xwhy_log_likelihood_memo")
-    memo_key = (model_name, original_prompt, perturbed_prompt)
+    memo_key = (model_name, explained_prompt, original_prompt, perturbed_prompt)
     if memo is not None and memo_key in memo:
         return memo[memo_key]
-    original = _pinned_original(explainer, original_prompt, original_output)
+    explained = _pinned_original(explainer, explained_prompt, explained_output)
     if "measure" not in state:
-        state["measure"] = _LOG_LIKELIHOOD_MEASURE if original.scorable else _TEXT_DISTANCE_MEASURE
-        if not original.scorable:
+        state["measure"] = _LOG_LIKELIHOOD_MEASURE if explained.scorable else _TEXT_DISTANCE_MEASURE
+        if not explained.scorable:
             return None
     value = float("nan")
-    if original.scorable and perturbed_prompt == original_prompt:
+    if explained.scorable and perturbed_prompt == original_prompt:
         value = 0.0
-    elif original.scorable:
+    elif explained.scorable:
+        y_sequence = explained.record.sequence
+        base_log_lik: float | None = float(sum(float(lp) for _token, lp, _alternatives in y_sequence))
+        if target is not None:
+            base_key = (model_name, explained_prompt, original_prompt, None)
+            if memo is not None and base_key in memo:
+                base_log_lik = memo[base_key]
+            else:
+                own = _lookup_recorded_response(explainer, original_prompt)
+                base_log_lik = _log_likelihood_under(explainer, y_sequence, own) if own is not None else None
+                if memo is not None and base_log_lik is not None:
+                    _bounded_put(
+                        memo, base_key, base_log_lik, _LOG_LIKELIHOOD_MEMO_CAPACITY, _LOG_LIKELIHOOD_MEMO_RETAIN
+                    )
         row = _lookup_recorded_response(explainer, perturbed_prompt)
-        if row is not None:
-            continue_fn = provider.continue_with_logprobs
-
-            def _continue_from(prefix: str, max_tokens: int) -> LogprobSequence | None:
-                """Continue the prefilled original prefix under the row's own queried prompt."""
-                return continue_fn(
-                    prompt=row.queried_prompt, assistant_prefix=prefix, model=model_name, max_tokens=max_tokens
-                )
-
-            log_lik = _teacher_forced_log_likelihood(original.record.sequence, row.sequence, _continue_from)
-            if log_lik is not None:
-                value = float(sum(float(lp) for _token, lp, _alternatives in original.record.sequence) - log_lik)
+        row_log_lik = _log_likelihood_under(explainer, y_sequence, row) if row is not None else None
+        if base_log_lik is not None and row_log_lik is not None:
+            value = float(base_log_lik - row_log_lik)
     if memo is not None:
         _bounded_put(memo, memo_key, value, _LOG_LIKELIHOOD_MEMO_CAPACITY, _LOG_LIKELIHOOD_MEMO_RETAIN)
     return value
@@ -970,6 +1050,11 @@ def compute_genuine_semantic_distance(
     log_lik_drop = _response_log_likelihood_drop(explainer, original_prompt, perturbed_prompt, original_output)
     if log_lik_drop is not None:
         return log_lik_drop
+    target = _active_explanation_target(explainer, original_prompt)
+    if target is not None:
+        # Test-suite v2 Stability: compare every row with the base answer, not this explanation's own.
+        original_prompt, original_output = target
+        prompt_context = target[0]
     orig_lp = _lookup_prompt_logprobs(
         explainer,
         original_prompt,
@@ -977,6 +1062,12 @@ def compute_genuine_semantic_distance(
         prompt_context=prompt_context,
         strict_prompt=strict_prompt_lookup,
     )
+    if target is not None:
+        # The base prompt's first-token distribution is pinned on first use, so later variants do not
+        # lose the logprob blend when the bounded snapshot store has turned over (rule #61).
+        pinned_lp = _provider_dict(explainer.state.provider, "_xwhy_pinned_first_token")
+        if pinned_lp is not None:
+            orig_lp = pinned_lp.setdefault(original_prompt, orig_lp) or orig_lp
     pert_lp = _lookup_prompt_logprobs(
         explainer,
         perturbed_prompt,
@@ -2473,6 +2564,11 @@ def apply_xwhy_smile_enhancements() -> None:
                 "response_measure": fit.response_measure,
                 "constant_response": fit.constant_response,
                 "status": fit.status,
+                # Test-suite v2: the explained prompt and the fitted design (held-out fidelity, Stability).
+                "original_prompt": full_orig_prompt,
+                "fit_masks": np.asarray(binary_masks, dtype=np.uint8)[fit.valid],
+                "fit_distances": np.asarray(fit.distances, dtype=float)[fit.valid],
+                "design_size": len(binary_masks),
             }
 
             result = _XWhyTextResult(
@@ -3646,6 +3742,9 @@ class ScopedXWhyResult:
         perturbation_mode: Active perturbation mode enum.
         importance_tokens: Extracted importance words if in IMPORTANCE_WORDS mode.
         importance_indices: Indices of importance words in full prompt.
+        original_output: Model response to `full_prompt` (the explained answer).
+        raw_data: Explained prompt, fitted design (`fit_masks`), targets (`y_target`) and kernel
+            weights, used by test-suite v2 (held-out fidelity, conditioned Stability).
     """
 
     feature_names: list[str]
@@ -3662,6 +3761,8 @@ class ScopedXWhyResult:
     importance_indices: list[int] = field(default_factory=list)
     num_perturbations: int = NUM_PERTURBATIONS
     num_features: int = 0
+    original_output: str = ""
+    raw_data: dict[str, Any] = field(default_factory=dict)
 
     @property
     def words(self) -> list[str]:
@@ -4215,6 +4316,8 @@ def direct_scoped_explain(
     Raises:
         RuntimeError: If the explainer has no callable LLM provider.
     """
+    import numpy as np
+
     words = target_text.strip().split() or [target_text]
     n_words = len(words)
     config = getattr(explainer, "config", None)
@@ -4287,4 +4390,13 @@ def direct_scoped_explain(
         importance_indices=importance_indices or [],
         num_perturbations=len(masks),
         num_features=n_words,
+        original_output=str(original_output),
+        raw_data={
+            "original_prompt": prompt_text,
+            "fit_masks": np.asarray(masks, dtype=np.uint8)[fit.valid],
+            "fit_distances": np.asarray(fit.distances, dtype=float)[fit.valid],
+            "design_size": len(masks),
+            "y_target": fit.y_target,
+            "weights": fit.weights,
+        },
     )
