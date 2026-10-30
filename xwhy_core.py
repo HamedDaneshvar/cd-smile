@@ -110,6 +110,10 @@ _LOGPROB_SNAPSHOT_RETAIN: Final[int] = 768
 # from that cache always still has the sequence it was generated with.
 _SEQUENCE_SNAPSHOT_CAPACITY: Final[int] = 1536
 _SEQUENCE_SNAPSHOT_RETAIN: Final[int] = 1152
+# v4.6.2: per-sample memo of log-likelihood drops, sized for every row of a sample's runs (baseline,
+# 7 Stability variants, Consistency re-run: 9 x 384 = 3456), so a re-run never recomputes a value.
+_LOG_LIKELIHOOD_MEMO_CAPACITY: Final[int] = 4096
+_LOG_LIKELIHOOD_MEMO_RETAIN: Final[int] = 3584
 # v4.6.2: response measure fixed per sample (recorded as `response_measure` with every explanation).
 _LOG_LIKELIHOOD_MEASURE: Final[str] = "log_likelihood_drop"
 _TEXT_DISTANCE_MEASURE: Final[str] = "text_distance"
@@ -281,10 +285,13 @@ def _pinned_original(explainer: Any, original_prompt: str, original_output: str)
       relies on;
     - the provider offers prefilled continuation (`continue_with_logprobs`);
     - the recorded tokens concatenate to the response text, so prefixes of `y` can be rebuilt;
-    - prefilling the first token of `y` under the original prompt makes the model continue with the
-      second, i.e. the prefill path renders the same context as the generation path (it would not,
-      for example, if a chat template dropped a disabled-thinking block once an assistant turn is
-      prefilled).
+    - prefilling the first token of `y` under the original prompt lists the second token among the
+      continuation's top-k alternatives, i.e. the prefill path renders the generation's context. A
+      different context (for example a chat template that drops a disabled-thinking block once an
+      assistant turn is prefilled) moves it out of the top-k; numerical differences between the
+      server's generate and chat paths only reorder near-ties. An exact greedy match is not required:
+      on Kaggle it rejected 4 of the 7 piqa Stability originals over a near-tie (`**Answer` vs
+      `**Option`).
 
     Args:
         explainer: Active explainer (provider, model name, temperature).
@@ -312,7 +319,7 @@ def _pinned_original(explainer: Any, original_prompt: str, original_output: str)
     )
     if scorable and len(tokens) >= 2:
         probe = continue_fn(prompt=record.queried_prompt, assistant_prefix=tokens[0], model=model_name, max_tokens=1)
-        scorable = bool(probe) and probe[0][0] == tokens[1]
+        scorable = bool(probe) and tokens[1] in probe[0][2]
     result = _PinnedOriginal(record=record, scorable=scorable)
     if pinned is not None:
         key = (model_name, original_prompt)
@@ -467,7 +474,7 @@ def _response_log_likelihood_drop(
             if log_lik is not None:
                 value = float(sum(float(lp) for _token, lp, _alternatives in original.record.sequence) - log_lik)
     if memo is not None:
-        _bounded_put(memo, memo_key, value, _SEQUENCE_SNAPSHOT_CAPACITY, _SEQUENCE_SNAPSHOT_RETAIN)
+        _bounded_put(memo, memo_key, value, _LOG_LIKELIHOOD_MEMO_CAPACITY, _LOG_LIKELIHOOD_MEMO_RETAIN)
     return value
 
 

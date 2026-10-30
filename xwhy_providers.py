@@ -537,6 +537,11 @@ def _extract_logprob_distribution(raw_payload: Any) -> dict[str, float] | None:
 
 
 _OLLAMA_SUPPORTS_LOGPROBS: bool = False
+# Koorosh said: set a fixed seed on every Ollama request so the LLM side has no run-to-run sampling
+# variation. At temperature 0 decoding is greedy and the seed changes nothing; it pins any sampling
+# that a non-zero temperature or a server-side default would introduce.
+_OLLAMA_SEED: Final[int] = 42
+
 _OLLAMA_STOP_SEQUENCES: Final[list[str]] = [
     "\n\n",
     "\nQuestion:",
@@ -698,6 +703,7 @@ def ollama_generate_non_empty(
             "temperature": float(temperature),
             "num_predict": int(budget),
             "num_ctx": 2048 if thinking_model else 1024,
+            "seed": _OLLAMA_SEED,  # Koorosh said: fixed LLM seed.
         }
         if not thinking_model:
             gen_options["stop"] = list(_OLLAMA_STOP_SEQUENCES)
@@ -750,6 +756,7 @@ def ollama_generate_non_empty(
             "temperature": float(temperature),
             "num_predict": int(budget),
             "num_ctx": 2048 if thinking_model else 1024,
+            "seed": _OLLAMA_SEED,  # Koorosh said: fixed LLM seed.
         }
         if not thinking_model:
             chat_options["stop"] = list(_OLLAMA_STOP_SEQUENCES)
@@ -816,6 +823,7 @@ def ollama_generate_non_empty(
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": token_budgets[-1],
             "temperature": float(temperature),
+            "seed": _OLLAMA_SEED,  # Koorosh said: fixed LLM seed.
         }
         if not thinking_model:
             v1_payload["stop"] = list(_OLLAMA_STOP_SEQUENCES)
@@ -911,6 +919,7 @@ def ollama_continue_logprob_sequence(
             "temperature": 0.0,
             "num_predict": max(1, int(max_tokens)),
             "num_ctx": 2048 if thinking_model else 1024,
+            "seed": _OLLAMA_SEED,  # Koorosh said: fixed LLM seed.
         },
         "logprobs": True,
         "top_logprobs": 5,

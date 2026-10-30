@@ -761,7 +761,7 @@ Logprobs are log-softmax over the full vocabulary, taken before temperature and 
 *Sign.* `d` can be negative: a deletion can make `y` more likely. Upstream `DistanceNormalizer.min_max` (linear) is `1 − (d − min)/(max − min)`, which is affine for any sign, so the information is kept rather than clipped.
 
 *What is unchanged:* designs, `M ≤ 384` and its Run 1 / Run 2 alignment, kernel, estimator, prompt augmentation, ground truth, metric definitions, and the generation request.
-- Generation keeps every Ollama option: `/api/generate`, `num_ctx`, temperature 0, the 32-token cap, stop sequences, `think=False`, `top_logprobs = 5`.
+- Generation keeps every Ollama option: `/api/generate`, `num_ctx`, temperature 0, the 32-token cap, stop sequences, `think=False`, `top_logprobs = 5`. A fixed `seed = 42` was later added to every request at the user's request (26.9).
 - Prefill calls use the same options without stop sequences.
 - The extra calls rebuild the forward pass of rows the design already contains. They add no perturbed inputs and are not counted in `num_perturbations`. Values are memoised per sample, so prompts that the Consistency re-run repeats cost nothing.
 
@@ -913,7 +913,48 @@ Fixing the last major item exposed a pre-existing violation of rule #62: a Stabi
 
 ### 26.9 Kaggle end-to-end validation
 
-(Recorded when the runs complete.)
+Private Kaggle kernels on a T4 with gemma2:2b, one validation sample per dataset, `M = 384`, Stability, Consistency and ablation enabled.
+- **Goal mode** ran commit `bfc58e5` itself (`cd-smile-v462-final-goal`).
+- **Full-prompt mode** ran the pre-review candidate: commit `d4251b0` with the candidate files overlaid. That candidate had the same response measure but not the 26.7 fixes.
+
+Every run completed without error. **0/6 samples passed all four thresholds in both modes.**
+
+| Mode | Dataset | K | AUC | Consistency dist. | Stability | Weighted R² | Prefill calls | Invalid rows |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| goal | battery_qa | 4 | 1.000 | 0.000 | 0.737 | 0.683 | 329 | 0 |
+| goal | boolq | 8 | 0.667 | 0.024 | 0.556 | 0.575 | 4,919 | 0 |
+| goal | hellaswag | 8 | 0.600 | 0.024 | 0.608 | 0.852 | 1,701 | 0 |
+| goal | mmlu | 10 | 0.480 | 0.000 | 0.478 | 0.542 | 639 | 0 |
+| goal | piqa | 12 | 0.314 | 0.028 | missing | 0.659 | 2,848 | 1,536 |
+| goal | trivia_qa_verified | 7 | 1.000 | 0.000 | 0.720 | 0.875 | 3,670 | 2 |
+| full_prompt | battery_qa | 37 | 0.554 | 0.142 | 0.788 | 0.928 | 5,588 | 3 |
+| full_prompt | boolq | 234 | 0.525 | 0.626 | 0.456 | 0.824 | 2,351 | 0 |
+| full_prompt | hellaswag | 51 | 0.656 | 0.169 | 0.759 | 0.975 | 3,182 | 6 |
+| full_prompt | mmlu | 28 | 0.304 | 0.280 | 0.734 | 0.921 | 2,574 | 0 |
+| full_prompt | piqa | 90 | 0.687 | 0.124 | 0.537 | 0.968 | 4,547 | 2 |
+| full_prompt | trivia_qa_verified | 7 | 1.000 | 0.000 | 0.716 | 0.875 | 4,420 | 70 |
+
+The real-pipeline numbers agree with the offline lab (26.5) to within a few hundredths. Examples:
+- full-prompt R² 0.928 / 0.975 / 0.921 / 0.968 vs lab 0.929 / 0.976 / 0.923 / 0.966;
+- goal Stability for battery, mmlu and trivia 0.737 / 0.478 / 0.720 vs lab 0.766 / 0.486 / 0.725.
+
+The 70 invalid rows of the full-prompt trivia run are the pre-review behaviour that 26.7 fixed (an immediate end of sequence returned `None`).
+
+**Two defects in `bfc58e5` found by these runs, fixed in the following commit:**
+
+1. **The prefill probe was too strict.** It required the greedy token after prefilling `y_0` to equal `y_1`.
+   - On piqa, 4 of the 7 Stability originals failed: the chat path picked `**Answer` where the generation path had picked `**Option`, the near-tie behind the 15/60 path difference in 26.6.
+   - Under the per-sample lock their 1,536 rows were invalid, so piqa Stability was reported missing.
+   - The probe now requires `y_1` to be among the continuation's top-5 alternatives. A different rendered context moves it out of the top 5; numerical near-ties do not.
+2. **The memo was too small.** It held 1,536 entries, so the 7 Stability re-runs evicted the baseline's values before the Consistency re-run.
+   - The prefill calls were then repeated. With Ollama's prompt-cache reuse they are not bit-identical, so boolq and hellaswag (`K = 8`, an exhaustive and seed-free design) reported Consistency distance 0.024 instead of 0.
+   - The memo now holds 4,096 entries, more than 9 runs × 384 rows.
+
+**Fixed LLM seed.** At the user's (Koorosh's) request, every Ollama request carries `seed = 42` (`_OLLAMA_SEED` in `xwhy_providers.py`, commented "Koorosh said"). This covers `/api/generate`, the `/api/chat` and `/v1` fallbacks, and the prefill continuation.
+- At temperature 0 decoding is greedy, so the seed changes no output. It pins any sampling that a non-zero temperature would introduce.
+- The only remaining run-to-run variation is numerical, from llama.cpp prompt-cache reuse. 140 of 140 `/api/generate` regenerations were identical; prefill calls are made at most once per prompt per sample (memo).
+
+**Not yet run.** The Kaggle account's weekly GPU quota (30 h) was exhausted before the commit carrying these fixes could be validated end to end. The same applies to `importance_words` mode and to the experiments in 26.13. They will run when the quota resets.
 
 ### 26.10 Known limitations and honest expectations for `v4.6.2`
 
@@ -950,3 +991,22 @@ Fixing the last major item exposed a pre-existing violation of rule #62: a Stabi
 - Deng, Y., Bakhtin, A., Ott, M., Szlam, A., Ranzato, M. *Residual Energy-Based Models for Text Generation.* ICLR 2020.
 - LeCun, Y., Chopra, S., Hadsell, R., Ranzato, M., Huang, F. J. *A Tutorial on Energy-Based Learning.* 2006.
 - Ollama source (v0.40.13): `server/routes.go` (`GenerateHandler`, `ChatHandler`, `_debug_render_only`), template rendering of a final assistant message, logprob computation before sampling.
+
+### 26.13 Further ideas tested after `bfc58e5` (offline, same 18 goal / 6 full-prompt samples)
+
+All variants use the repository's estimator and metrics on the recorded gemma2 responses and prefill continuations. Results are per sample; a sample passes when all four thresholds hold.
+
+| Idea | Rationale | Goal: pass, median Stab., median R² | Full prompt: pass, median Stab., median R² | Verdict |
+| :--- | :--- | :--- | :--- | :--- |
+| `v4.6.2` teacher-forced drop (reference) | 26.3 | 1/18, 0.536, 0.660 | 0/6, 0.736, 0.926 | Adopted |
+| Explain the answer line only (`y` up to its first newline) | ESCI explains a user-chosen target part of the output, and the rationale line quotes prompt words | 1/18, **0.587**, **0.690** | not run | Small gain in goal mode, same pass count; not adopted (the rule that the first line is the answer is an assumption about output format) |
+| Tighter censoring bound `min(min listed logprob, log(1 − listed mass))` | Smallest valid upper bound for an unlisted token | 0/18, 0.536, 0.659 | not run | No gain; not adopted |
+| Per-token probability ratio `1 − exp(−d/L)` | Bounded scale | 0/18, 0.536, 0.668 | not run | No gain |
+| Drop clipped at 0 | Distance semantics | 1/18, 0.505, 0.641 | not run | Worse Stability |
+| KernelSHAP estimand (Shapley-kernel weighted least squares, exact on exhaustive designs; Lundberg & Lee 2017) | Averages marginal effects over all coalition sizes | 0/18, **0.610**, 0.512; Consistency < 0.05 drops from 15 to 11 | 0/6, 0.738, 0.924 | Gains Stability at the cost of R² and Consistency; not adopted |
+
+Pending (Kaggle quota):
+- the same pipeline without the `v4.4.5` rationale suffix (`cd-smile-exp-nosuffix-goal`). The suffix exists to make text distances continuous, which the likelihood signal does not need.
+- the same method on gemma2:9b (`cd-smile-exp-gemma2-9b-goal`), to separate method limits from 2B-model behaviour.
+
+The kernels are prepared and pinned to the fixing commit.
