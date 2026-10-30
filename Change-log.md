@@ -1186,3 +1186,48 @@ Reading: the v2 gates behave as designed on real model output.
 70. **DO NOT REPEAT (`v4.6.3` review): Making up a score when a test is undefined.** Single-class labels, invented labels, projections onto a different scope, all-zero explanations and silent 0.5 or 0 fallbacks must give "missing" or "not applicable", never a number.
 71. **DO NOT REPEAT (`v4.6.3` finding): Extrapolated RBO on complete short rankings.** Truncate at the list length and renormalise by 1 − pᴷ.
 72. **DO NOT REPEAT (`v4.6.3` review): Cross-validating an estimator on folds that remove the rows it is anchored on.** Keep the baseline and single-deletion rows in every training fold, or the held-out score measures a different estimator.
+
+### 27.8 Idea tested after `16102f5`: explain the answer's meaning, not its wording (offline, rejected)
+
+**Why.** The CPU run (27.6.1) still failed Stability and Fidelity on battery_qa. Its 16-row table shows the likelihood drop scoring a pure formatting change about as high as a wrong answer: `**Answer:** Al foil` vs `Answer: **Al foil**` costs about 16 nats. In the recorded data, 38% of the goal-mode response pairs whose text differs (48% in full-prompt mode) give the same answer and differ only in form. The idea: explain whether the answer changes, not whether its wording changes.
+
+**Signal.** For each row, compare the perturbed response with the run's own unperturbed response (each Stability variant against its own original). The comparer sees the unperturbed prompt and the two responses only, never the ground truth or the mask. Identical text gives 0.
+- **Oracle (upper bound):** Claude Haiku 5.5 answers "Do Response A and Response B give the same answer to the prompt's question?", ignoring formatting, wording and the quoted key phrase. d = 0 for Yes, 1 for No. This stands in for a near-perfect meaning detector; it is an external API and not a pipeline option.
+- **Local (pipeline-feasible):** two NLI cross-encoders already reachable through the package's `transformers` dependency, scored in both directions.
+  - `kuhn`: 0 if each response entails the other (argmax), else 1 (bidirectional entailment, Kuhn, Gal & Farquhar, ICLR 2023).
+  - `ent`: 1 − mean entailment probability of the two directions.
+  - `con`: mean contradiction probability (both graded, after Lin, Trivedi & Sun, TMLR 2024).
+  - They ran on a free Kaggle CPU session: private kernel `kooaslansefat/cd-smile-nli-pairs`, saved version 2, on the private dataset `kooaslansefat/cd-smile-response-pairs` (8,032 unique recorded gemma2 response pairs, no keys, no ground truth). Run time was 5,383 s for `microsoft/deberta-large-mnli` and 1,776 s for `cross-encoder/nli-deberta-v3-base`. Saved version 1 stopped in the harness because Kaggle unpacks `.gz` files in datasets.
+
+All rows are scored by the repository's estimator and the v1 metrics on the same 18 goal and 6 full-prompt samples as 26.13.
+
+| Signal | Goal: pass, median Stab., median R² | Full prompt: pass, median Stab., median R² |
+| :--- | :--- | :--- |
+| `v4.6.2` teacher-forced drop (reference) | 1/18, 0.536, 0.660 | 0/6, 0.736, 0.926 |
+| Same answer, Claude Haiku 5.5 judge (oracle) | 0/18, 0.567, 0.659 | 0/6, 0.619, 0.857 |
+| NLI `deberta-large-mnli`, `kuhn` | 0/18, 0.532, 0.617 | 0/6, 0.442, 0.722 |
+| NLI `deberta-large-mnli`, `ent` | 0/18, 0.470, 0.641 | 0/6, 0.498, 0.751 |
+| NLI `deberta-large-mnli`, `con` | 0/18, 0.526, 0.581 | 0/6, 0.603, 0.767 |
+| NLI `nli-deberta-v3-base`, `kuhn` | 0/18, 0.521, 0.617 | 0/6, 0.426, 0.754 |
+| NLI `nli-deberta-v3-base`, `ent` | 0/18, 0.471, 0.653 | 0/6, 0.489, 0.769 |
+| NLI `nli-deberta-v3-base`, `con` | 0/18, 0.496, 0.618 | 0/6, 0.594, 0.704 |
+
+No NLI variant gets a single goal-mode sample above 0.80 Stability. Every one is below both the likelihood drop and the oracle.
+
+**How well the NLI models agree with the judge** (8,032 pairs):
+- Strict bidirectional entailment calls only 11% (`deberta-large-mnli`) and 13% (`nli-deberta-v3-base`) of pairs equivalent, against the judge's 38–48%, and it agrees with the judge on 69% of pairs. The models read the extra explanation and the quoted key phrase as new content.
+- The graded scores rank pairs well. Against the judge's labels, the AUC is 0.881 (`ent`) and 0.911 (`con`) for `deberta-large-mnli`, and 0.832 and 0.833 for `nli-deberta-v3-base`. Even so, the leftover noise lowers Stability below the binary oracle's.
+
+**Why even the oracle fails: battery_qa 0000 (K = 4: What, is, the, cathode?).**
+- On the base run the meaning signal is exact. The answer is Al foil whenever "cathode?" is kept and changes whenever it is removed, so the fit puts 1.0 on "cathode?" and 0 on the rest, with R² 1.000. Fidelity is fixed here.
+- Stability collapses to 0.394, from similarities 0.41, 0.31, 0.20, 1.00, 0.23, 0.31 and 0.30 across the seven filler variants. The fillers change gemma2's own answer rule:
+  - with "please" appended, "is the cathode? please" gives `Answer: **Cathode**`, which is wrong;
+  - "What is cathode? please" gives "Cathode is the negative electrode.", which ignores the passage;
+  - with "could" prepended, "could What is cathode?" gives the same context-free definition.
+- With a filler present, "What", "is" and "the" really do change the answer, so a faithful explanation must give them weight (the "please" variant's coefficients are 0.28, −0.32, 0.27 and 0.73 on What, is, the and cathode?, and −0.36 on "please"). Stability v1 counts that as instability.
+
+The binary signal also degenerates on some samples. On mmlu 0000 and 0002 every response gives the same answer, so d is constant: R² is 0 and Consistency is 1.0. piqa 0001 has K = 1.
+
+**Verdict: rejected.** Removing format churn removes a real error source, and it fixes Fidelity where the model's answer depends on a few words. Even with a near-perfect meaning detector, the remaining Stability failures come from gemma2:2b answering differently when a filler word is added, not from the explainer. This matches the debate's reading (26.14): Stability > 0.80 and R² > 0.90 can only hold together where the model ignores fillers. No repository code changed. The gemma2:9b run (26.13, pending GPU quota) is the direct test of that.
+
+73. **DO NOT REPEAT (27.8): Explaining a same-answer (meaning) signal to raise Stability, whether binary or NLI-graded.** It cannot beat the likelihood drop here, even with an oracle judge. The binary form is constant when the model's answer never changes, and both forms expose filler-driven answer changes instead of hiding them.
