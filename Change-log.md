@@ -1155,6 +1155,29 @@ Readings:
 
   All of it is switched off with `compute_test_suite_v2=False`.
 
+#### 27.6.1 CPU integration check against real Ollama (2026-10-30)
+
+While the GPU quota was exhausted, the unmodified commit `792a13f` ran on a free Kaggle **CPU** session: private kernel `kooaslansefat/cd-smile-v463-cpu-battery-goal`, saved version 2, gemma2:2b, goal mode, battery_qa, 1 sample. The only harness change from the prepared GPU kernels is the benchmark filter. Saved version 1 stopped in the harness itself (`nvidia-smi` does not exist on CPU machines) before any repository code ran.
+
+This is an **integration check, not a validation result**. CPU logprobs can differ numerically from the T4, and one sample says nothing about pass rates.
+
+- **It ran end to end in 1,936 s with no exception.** Every v1 and v2 field was produced, and so were the side-by-side table, the per-metric pass rates and the per-dataset `v2_samples`.
+- **The signal is clean.** 258 rows were scored by the likelihood drop, with 0 NaN and 0 text-distance fallbacks. All 483 prefill calls succeeded, none empty.
+- **v2 adds work.** The same sample under v1 on the T4 (`a950173`) made 329 prefill calls and scored 146 rows.
+- **CPU numbers stay close to the T4.** The explainer code is identical between the two commits. On this sample, v1 Stability is 0.726 on CPU vs 0.737 on the T4, and in-sample R² is 0.657 vs 0.683.
+
+| Test | v1 | v2 |
+| :--- | :--- | :--- |
+| AUC | 1.000, pass | 1.000, reported only (word-length baseline 1.000) |
+| Consistency | 0.000, pass | n/a: the 16-row design for K = 4 is exhaustive and ignores the seed, so v1 passes automatically |
+| Stability | 0.726, fail | 0.8007 on the original tokens, but the filler holds 0.171 of the attribution (gate < 1/9), fail. The start insertions take 0.41 (could) and 0.37 (would); end and punctuation fillers score 0.87–0.90. |
+| Fidelity | in-sample R² 0.657, fail | held-out R² −0.706 on 11 multi-deletion rows, fail |
+| Ablation | 0.992, reported | 0.992; top-k 17.75 vs random-k mean 12.96, pass |
+
+Reading: the v2 gates behave as designed on real model output.
+- The filler-share gate catches a run whose similarity alone would just pass. gemma2's likelihood genuinely reacts to a modal verb placed before the goal.
+- The held-out test exposes the deletion interactions that the in-sample R² averages away.
+
 ### 27.7 New "DO NOT REPEAT" guardrails (#69 – #72), and #67 amended
 
 - **#67, amended:** the explainer and its estimator must never re-target Stability variants or strip filler tokens. An owner-approved *test* definition may (27.1), when it is reported next to v1 and gates the filler share.
