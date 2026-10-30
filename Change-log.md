@@ -1010,3 +1010,37 @@ Pending (Kaggle quota):
 - the same method on gemma2:9b (`cd-smile-exp-gemma2-9b-goal`), to separate method limits from 2B-model behaviour.
 
 The kernels are prepared and pinned to the fixing commit.
+
+### 26.14 Independent three-agent debate on the test design (read-only, no changes made)
+
+At the owner's request, three agents debated whether the evaluation tests are correctly designed:
+- a critic, arguing they are flawed;
+- a defender, arguing they are sound;
+- a neutral XAI-methodology judge.
+
+None of them changed anything. They read the code, the brief and this Change-log, and checked numbers in throwaway scripts. After one rebuttal round the defender withdrew several defences, and the judge ruled:
+
+| Test | Final verdict | Main reasons |
+| :--- | :--- | :--- |
+| Token AUC (overall) | **Invalid as designed** | Labels are lexical (length > 2 and a stoplist), so `5V`, `12`, `no` and the correct MMLU option are labelled 0. A model-free scorer that uses only word length reaches mean AUC 0.95–0.96 and passes on 8 of 8 questions (fails the model-dependence check of Adebayo et al. 2018). `ensure_binary_variance` invents a label. |
+| AUC in `importance_words` mode | **Invalid as designed** | Single-class scopes are projected onto the full prompt, which gives AUC = 0.5 + K/(2·n_pos) whatever the attributions are. All five reported values are reproduced with integer n_pos. |
+| Consistency | **Valid with caveats** | Passes automatically for exhaustive designs (K ≤ 8). Spearman over all tokens is driven by the null-token tail (ρ ≈ 1 − f³) and rewards zeroing those tokens. |
+| Stability | **Invalid as designed** | Each variant explains its own freshly generated answer, with no conditioning on the output staying the same (Agarwal et al. 2022). An equal filler share gives K/(K+2) (exactly 0.800 at K = 8, which fails the strict `>`). The fillers are not neutral, and occurrence-key alignment can misalign tokens. |
+| Fidelity (weighted in-sample R²) | **Valid with caveats as a diagnostic; weak as a gate** | It is LIME's own score, scored with the explainer's chosen kernel and in-sample. Pure noise passes about 33% of the time at K = 2. The only interventional test (top-k vs bottom-k ablation) is not part of the pass rule. |
+| Joint all-four rule | **Invalid as designed** | Not calibrated against oracle or null baselines. The pass probability shrinks geometrically with the number of samples. Versions with prior boxes (`v4.4.9`, `v4.5.3`–`v4.5.5`) passed the battery (6/6 to 10/10) and were caught only by the code audit. |
+| Implementation | **Valid with caveats** | The arithmetic is correct (Mann-Whitney U, Ruzicka = (1 − TV)/(1 + TV), weighted R²). Several fallbacks fail silently: `tables:124-126`, `ground_truth:714-715`, `ground_truth:1128-1150`, `metrics:327`, `metrics:1050-1053`, and ablation prompts rebuilt with `" ".join`. |
+
+**Judge's answer to "are my designed tests correct?":** not as a validation battery.
+- The arithmetic is correct, and Consistency and Fidelity measure real properties with caveats.
+- The battery cannot tell a faithful explainer from a model-free one, so a pass is not evidence of quality.
+- A faithful explainer of gemma2:2b fails Stability because each variant explains a different answer, so a failure is not evidence of poor quality either.
+
+**Judge's recommendations, in priority order (for the test owner; none applied):**
+1. Ungate AUC or replace its ground truth (human rationales, or exact Banzhaf values for K ≤ 12), report N/A for single-class scopes, and add a null-scorer check.
+2. Condition Stability on the original answer (teacher-force `y` under each variant), compare only the original tokens, and report the filler share separately.
+3. Gate faithfulness with ablation (comprehensiveness and sufficiency) and held-out R².
+4. Consistency over at least 5 seeds with a top-weighted measure, reported N/A for exhaustive designs.
+5. Calibrate thresholds against oracle and null baselines, and report per-metric pass rates with confidence intervals.
+6. Fix the silent fallbacks listed above.
+
+These are decisions for the test owner. The explainer work in this section leaves every test, threshold and ground-truth rule unchanged.
