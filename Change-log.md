@@ -1,6 +1,6 @@
-# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.6.1`)
+# XWhy (CD-SMILE) Multi-Model Pipeline — Architectural & Mathematical Change Log (`v4.3.7` → `v4.6.2`)
 
-This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.6.1`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
+This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Explainable AI evaluation pipeline from `v4.3.7` through `v4.6.2`, including root-cause post-mortems of empirical benchmark runs, pre-flight scientific integrity audits, mathematical formulations, and strict **"DO NOT REPEAT"** engineering guardrails.
 
 ---
 
@@ -28,7 +28,8 @@ This document tracks the complete evolutionary history of the XWhy (CD-SMILE) Ex
 | **`v4.5.5`** | 8-File Modular DAG (`xwhy_core.py` Upgrade) | Expanded Stratum 1 (`[0.16, 0.38]`), Target-Synchronized `d_scaled`, `0.18` Active-Shift Gate & `(d_scaled / 0.90)^2` Kernel | Expanded Stratum 1 QMC anchor range to `[0.16, 0.38]`, synchronized `d_scaled = y_drop / max_y_drop` with `y_arr`, gated `active_coal_rows` at `d_scaled >= 0.18`, and replaced `(d_scaled / 0.35)^2` with `(d_scaled / 0.90)^2`. | **Colab 10-Sample `mmlu` Test (`xwhy_pipeline_v4.5.5.mmlu.log`):** Passed **10/10** on `Weighted R²` (`0.9375–0.9974`, mean `0.9629`), **10/10** on `Stability` (`0.9808–0.9971`, mean `0.9888`), **10/10** on `Token AUC` (`0.9097–1.0000`, mean `0.9528`), and **8/10** on `Consistency < 0.05` (`0.0086–0.0403`), with only `mmlu/0001` (`0.0882`) and `mmlu/0004` (`0.0654`) missing `Consistency` due to 23/26 flat-ceiling low-band ties (`min(pi_raw[i], 0.006 * span_mask_local[i])`) and `tau` floor amplification (`tau >= 0.005..0.02`). Documented in Section 16. |
 | **`v4.5.6`** | 8-File Modular DAG (Targeted `xwhy_core.py` Upgrade) | Three-Band Tie-Free Affine Scaling, Universal `surface_spec` + `w_rep`, `1.65` Domain-Noun Rescue & Proportional `tau = mu_raw.copy()` | Upgraded **only `xwhy_core.py`**: computed `surface_spec` and `len_factor` for all tokens (including `len <= 2`), rescued 5+ letter domain nouns (`"group"`) at `best_rank >= 150 and max_vec_norm >= 1.65`, applied occurrence decay `w_rep` to all tokens before `span_mask_local`/`is_short_or_low_info` checks, replaced flat-ceiling clamping with 3-band tie-free affine scaling (`[0.25, 1.00]`, `[0.0012, 0.0065]`, `[0.00002, 0.00025]`), and set `tau = np.clip(mu_raw.copy(), 1e-6, 1.0)` so `delta_b = tau * gamma_d` scales as $O(\tau_j^2)$. | **Rejected (Failed Integrity Audit, 2026-10-29):** Row-index kernel collapse (`d_coal_loc`, `sigma_loc` down to `0.26`), `r1 = min(0.035, 1/K)` multiplicative box around a static prior, response-dependent kernel factor `(d_scaled / 0.90)^2`, `r2_try >= 0.935` threshold-seeking stopping rule, and span-mask down-weighting of template tokens to `[2e-5, 2.5e-4]` in `full_prompt` mode. Documented in Section 19. |
 | **`v4.6.0`** | 8-File Modular DAG (`xwhy_core.py` rewrite; budget/schema/bug-fix alignment in `xwhy_metrics.py`, `xwhy_multimodel_pipeline.py`, `xwhy_providers.py`) | Legitimate, full-data, full-prompt surrogate | Product perturbation measure `q = 1/(K+1)` (simulation-guided, disclosed); KernelSHAP complete-stratum rule for every stratum incl. single-token occlusions (complete up to `K ≈ 223` at `M = 384`); identity-keyed CRN sampling with no duplicates and no salience-driven design; layout-preserving token deletion; mask-only post-stratified kernel with collapsed sparse strata; weighted least squares on all rows; heteroscedastic empirical-Bayes shrinkage of sampled-coalition corrections toward the LLM's exact occlusion effects; GCV ridge for longer scopes; ceiling `384` aligned across baseline, Stability and Consistency; Word2Vec prior, span masks, trust-region box and output stopword filter removed; `importance_words` Stability index bug and checkpoint-schema reuse fixed. | **Superseded by `v4.6.1`.** First real Kaggle run (gemma2:2b, `mmlu` `goal`, 1 sample) completed without errors but missed 3 of 4 thresholds; a third independent audit found that scopes of 224+ words left tokens never deleted (zero attribution). Section 25. |
-| **`v4.6.1` (Current)** | Same as `v4.6.0` | Post-release review fixes | One output-distance blend for identical and changed responses; balanced permutation-stream design for long scopes so every token is deleted at least once, with a coverage floor on `q` above ~603 words; estimator name reported per branch; least-recently-written snapshot eviction; `importance_words` Stability reported as missing instead of a partial mean; checkpoint schema `4.6.1`. | **Kaggle coverage run across all 6 datasets and 3 modes (Section 25).** Thresholds are **not** guaranteed (Section 22). |
+| **`v4.6.1`** | Same as `v4.6.0` | Post-release review fixes | One output-distance blend for identical and changed responses; balanced permutation-stream design for long scopes so every token is deleted at least once, with a coverage floor on `q` above ~603 words; estimator name reported per branch; least-recently-written snapshot eviction; `importance_words` Stability reported as missing instead of a partial mean; checkpoint schema `4.6.1`. | **Superseded by `v4.6.2`.** Kaggle coverage run, all 6 datasets × 3 modes: 0/6 pass in every mode (25.4). |
+| **`v4.6.2` (Current)** | Same as `v4.6.0`; additive Ollama prefill call in `xwhy_providers.py`; Stability/ablation guards in `xwhy_metrics.py` | Explain the model's likelihood of its own answer | Response distance = teacher-forced log-likelihood drop of the original response, `log p(y|x) − log p(y|x~)` (ContextCite/AttriBoT target; the ESCI paper's energy of a fixed target response with the LLM as the energy), assembled from the row's greedy generation plus `/api/chat` assistant-prefill continuations; one measure per sample (`response_measure`); text distance kept for providers without logprobs/prefill; Stability missing when any variation fails; bounded, NaN-safe ablation score; checkpoint schema `4.6.2`. | Offline on 24 real gemma2:2b samples: goal 1/18 pass (was 0/18), full prompt 0/6 with median R² 0.93 (was 0.72–0.79) and Stability 0.74 (was 0.55). Remaining failures traced to model behaviour and ground-truth definitions (26.6). Thresholds are **not** met on most samples. |
 
 ---
 
@@ -665,4 +666,287 @@ A separate agent, given the brief and the diff but not the author's conclusions,
 
 ### 25.4 Coverage run across datasets and modes
 
-Results of the Kaggle coverage run (all 6 default datasets × `goal`, `importance_words`, `full_prompt`, one sample each) are recorded below when it completes.
+Private Kaggle kernels at commit `d4251b0` (`v4.6.1`), gemma2:2b on a T4, one validation sample per default dataset and mode, `M = 384`, Stability, Consistency and ablation enabled. Every run completed without error. **No sample passed all four thresholds in any mode (0/6, 0/6, 0/6).**
+
+| Mode | Dataset | K | AUC | Consistency dist. | Stability | Weighted R² |
+| :--- | :--- | ---: | ---: | ---: | ---: | ---: |
+| goal | battery_qa | 4 | 1.000 | 0.000 | 0.722 | 0.822 |
+| goal | boolq | 8 | 0.333 | 0.000 | 0.412 | 0.734 |
+| goal | hellaswag | 8 | 0.800 | 0.000 | 0.662 | 0.890 |
+| goal | mmlu | 10 | 0.600 | 0.012 | 0.289 | 0.462 |
+| goal | piqa | 12 | 0.286 | 0.007 | 0.589 | 0.464 |
+| goal | trivia_qa_verified | 7 | 0.917 | 0.000 | 0.698 | 0.854 |
+| importance_words | battery_qa | 3 | 0.000 | 0.000 | 0.811 | 0.631 |
+| importance_words | boolq | 12 | 0.541 | 0.007 | 0.416 | 0.503 |
+| importance_words | hellaswag | 5 | 0.632 | 0.000 | 0.526 | 0.740 |
+| importance_words | mmlu | 4 | 0.900 | 0.000 | 0.384 | 0.561 |
+| importance_words | piqa | 11 | 0.617 | 0.000 | 0.471 | 0.488 |
+| importance_words | trivia_qa_verified | 2 | 0.833 | 0.000 | 0.815 | 0.886 |
+| full_prompt | battery_qa | 37 | 0.497 | 0.328 | 0.800 | 0.897 |
+| full_prompt | boolq | 234 | 0.435 | 0.797 | 0.408 | 0.713 |
+| full_prompt | hellaswag | 51 | 0.480 | 0.193 | 0.604 | 0.762 |
+| full_prompt | mmlu | 28 | 0.322 | 0.218 | 0.647 | 0.893 |
+| full_prompt | piqa | 90 | 0.540 | 0.689 | 0.439 | 0.593 |
+| full_prompt | trivia_qa_verified | 7 | 0.917 | 0.000 | 0.698 | 0.854 |
+
+These failures are diagnosed in Section 26.
+
+---
+
+## 26. `v4.6.2`: Response Log-Likelihood ("Energy") Signal (2026-10-30)
+
+### 26.1 Why `v4.6.1` still failed: evidence
+
+**Offline replay lab.** Every run of the coverage and collection kernels was replayed offline. The design, deletion, prompt augmentation, estimator, ground truth, AUC, Consistency, Stability and weighted-R² code is AST-extracted from the repository, and only the LLM call and the response distance are pluggable.
+- Exactness: prompts and masks are identical to the pipeline's for all goal and full-prompt checkpoints, the coefficient difference is 8.8e-14, and the lab AUC equals the reported AUC for all six full-prompt datasets.
+- Stability and Consistency re-runs use the baseline's own budget `M` (`2^K` for exhaustive designs), as `xwhy_metrics.py` does.
+- Response data: gemma2:2b on a T4, 18 goal samples (3 per dataset) and 6 full-prompt samples. Every row response was recorded with its full per-position logprobs (top 5), giving 37,230 goal and 17,638 full-prompt (row, original) pairs.
+
+**Every text or first-token signal fails (18 goal samples, exact lab):**
+
+| Response signal | Pass | AUC > 0.7 | Cons. < 0.05 | Stab. > 0.8 | R² > 0.9 | median Stab. | median R² |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| First-token logprob JS (`v4.6.1` logprob term) | 0/18 | 5 | 16 | 0 | 1 | 0.461 | 0.588 |
+| Word-set Jaccard between responses (text-only) | 0/18 | 7 | 15 | 0 | 2 | 0.558 | 0.620 |
+| Log-likelihood drop along the shared prefix, censored at the first divergence | 0/18 | 5 | 15 | 0 | 1 | 0.510 | 0.586 |
+
+Haiku 5.5 with the text-only signal (9,604 responses, no logprobs) gave the same picture: 0/6 pass, Stability 0.47–0.71, R² 0.09–0.70.
+
+**Why Stability fails.** The Ruzicka similarity was decomposed into three parts:
+- Main vs seed-43 re-run on the same prompt (estimator noise): 0.96–1.00 for `K ≤ 15`.
+- Share of the injected filler token: below 0.10 in 14 of 18 samples.
+- Similarity of the original tokens after renormalisation: only 0.45–0.75.
+
+So the attribution of the *original* tokens reshuffles when a filler is inserted. The model's greedy responses change on 25–80% of rows when `could`, `###` or `!` is inserted. For trivia sample 2, only 51 of 251 matched rows keep an identical response. Most of these changes are formatting: `**Answer:** Caspian Sea` becomes `Astrakhan and Baku ports are on the **Caspian Sea**.`. Any distance between two generated texts, or between first-token distributions, measures these formatting flips. Censoring at the first divergence measures the formatting token, not the answer.
+
+### 26.2 What was borrowed from the ESCI paper, and what was not
+
+*Interpreting Black-Box LLMs with Sentence-Level Energy Landscapes* (ESCI) scores a fixed target response `y_T` under masked prompts. Its interpreter maximises `E_LM(x − x̃, y_T) − E_LM(x̃, y_T)` (its Eq. 3), and its analysis measures a unit's importance by the energy drop its removal causes relative to `E(x, y)`. ESCI learns `E_LM` with a 181M-parameter EBM trained on 20,000 pairs, and it cites residual EBMs that add energy to autoregressive log-probabilities (Deng et al., 2020).
+
+- **Borrowed:** the quantity being explained is the energy of the original response `y` under each perturbed prompt. The energy is the explained model's own negative log-likelihood, `E(x̃, y) = −log p(y | x̃)`, so it is exact for the model being explained, needs no surrogate network or training data, and is the target of ContextCite (Cohen-Wang et al., NeurIPS 2024, which regresses the logit of `p(y | x̃)`) and AttriBoT (Liu et al., ICLR 2025, leave-one-out log-likelihood drop).
+- **Not borrowed:**
+  - The trained EBM. A learned energy would explain the surrogate rather than the LLM.
+  - The Gumbel-softmax interpreter. It selects sentences by zeroing them, which the brief forbids.
+  - Sentence-level units. The evaluation is token-level.
+  - The global (cross-input) interpreter. XWhy is local and per-prompt.
+
+### 26.3 Method
+
+For prompt `x` with original response tokens `y = (y_0, …, y_{L−1})` and a design row's perturbed prompt `x̃`:
+
+`d(x̃) = log p(y | x) − log p(y | x̃)`, where `log p(y | x̃) = Σ_t log p(y_t | x̃, y_{<t})`.
+
+Ollama returns logprobs only for generated tokens. It has no prompt-logprob or `echo` API, and it does not report end-of-sequence or stop-sequence tokens. The teacher-forced sum is therefore assembled from greedy generations (`_teacher_forced_log_likelihood`):
+
+1. While a segment reproduces `y`, the histories are identical and its logprobs are the exact terms. The first segment is the row's own generation, so rows whose generation equals `y` need no extra call.
+2. At the first position `t` where a segment leaves `y`, the term for `y_t` is read from that position's top-5 alternatives. If `y_t` is not listed, the smallest listed logprob is used. This is an upper bound on `log p(y_t)`, a right-censored term that can only understate the drop.
+3. If the row's own generation ended before `t`, no distribution at `t` was returned. The cause may be end of sequence, or a stop sequence whose tokens the server trims. The distribution at `t` is then read from a continuation of `y_{<t}`.
+   - Continuations are generated without stop sequences. Stop sequences only truncate output and never change a logit, so an empty continuation means end of sequence was the greedy choice at `t`.
+   - In that case `p(y_t) ≤ 1/2`, and `log ½` is the bound.
+4. `y_{≤t}` is sent as a trailing assistant message to `/api/chat` (assistant prefill). Ollama's gemma2 template renders a final assistant turn without `<end_of_turn>` and does not trim it, so the model continues `y`. The scan resumes at step 1 on the continuation.
+
+Logprobs are log-softmax over the full vocabulary, taken before temperature and sampling, so they form a proper distribution at temperature 0. Both bounds can only make `d` smaller.
+
+**One measure per sample** (rules #51 and #61):
+- The measure is fixed at the sample's first distance, which is in the baseline run, and recorded as `response_measure` in every explanation's `raw_data`/`metrics`.
+- The log-likelihood drop is used when that run's original is scorable (`_pinned_original`), meaning all of these hold:
+  - decoding is greedy;
+  - the provider offers prefilled continuation;
+  - the recorded tokens concatenate to the response text (true for all 46,054 recorded gemma2 responses);
+  - prefilling the first token of `y` makes the model continue with the second, i.e. the prefill path renders the generation's context. It would not, for example, if a chat template dropped a disabled-thinking block once an assistant turn is prefilled.
+- Otherwise the `v4.6.1` text distance is used for the whole sample. That is the case for Anthropic and OpenAI chat, which lack logprobs or prefill.
+- Once a sample is fixed to the drop, a row whose generation or continuation is missing, or a later explanation whose original is not scorable, gets `NaN`. It never switches to the text distance. That explanation fails, and its metric is reported missing.
+- Only `/api/generate` responses are recorded as sequences. The `/api/chat` and `/v1` fallbacks send a system prompt or a different context, so their rows are invalid under the drop, never mixed in.
+
+*Sign.* `d` can be negative: a deletion can make `y` more likely. Upstream `DistanceNormalizer.min_max` (linear) is `1 − (d − min)/(max − min)`, which is affine for any sign, so the information is kept rather than clipped.
+
+*What is unchanged:* designs, `M ≤ 384` and its Run 1 / Run 2 alignment, kernel, estimator, prompt augmentation, ground truth, metric definitions, and the generation request.
+- Generation keeps every Ollama option: `/api/generate`, `num_ctx`, temperature 0, the 32-token cap, stop sequences, `think=False`, `top_logprobs = 5`.
+- Prefill calls use the same options without stop sequences.
+- The extra calls rebuild the forward pass of rows the design already contains. They add no perturbed inputs and are not counted in `num_perturbations`. Values are memoised per sample, so prompts that the Consistency re-run repeats cost nothing.
+
+### 26.4 Implementation
+
+- **`xwhy_providers.py`** (additive, apart from one shared helper):
+  - `_extract_logprob_sequence` and `_RECENT_OLLAMA_LOGPROB_SEQUENCES` keep every generated position, with the same keys and bound as the first-token store. `_record_raw_ollama_logprobs(..., record_sequence=False)` is used for the chat and `/v1` fallbacks.
+  - `ollama_continue_logprob_sequence` and `OllamaThinkingSafeProvider.continue_with_logprobs` implement prefilled continuation. They return `[]` when the model ends the turn at once, and `None` on a transport failure.
+  - `_ollama_native_base` and `_ollama_post_fn` are shared by generation and continuation (DRY).
+  - `_reclaim_sample_memory` clears the sequence store, pinned originals, memo and measure lock.
+- **`xwhy_core.py`:**
+  - `_RecordedResponse` holds the sequence and the exact prompt sent. `_snapshot_prompt_logprob_sequence` keeps them in a bounded, least-recently-written store of 1,536 entries, larger than the 1,024-entry response cache, so a cached row always still has its sequence.
+  - `_lookup_recorded_response` looks rows up strictly by prompt.
+  - `_PinnedOriginal` and `_pinned_original` handle pinning and the scorability checks.
+  - `_teacher_forced_log_likelihood` is a pure function.
+  - `_response_log_likelihood_drop` applies the per-sample lock and memo.
+  - `compute_genuine_semantic_distance` routes through the drop first.
+  - `response_measure` is recorded in `_PerturbationFit`, `raw_data` and `metrics`.
+- **`xwhy_metrics.py`:**
+  - `_normalized_ablation_delta` is identical to the old formula for non-negative distances. For the signed drop it divides by `max(|d_top|, |d_bot|)`, which keeps the score in `[−2, 2]`. A non-finite value gives a missing score instead of the old `0.0`.
+  - Stability is reported missing when any variation fails (rule #62). Before, failed variations were dropped from the mean. The overall-mean log line handles a missing value.
+- **`xwhy_multimodel_pipeline.py`:** checkpoint schema `4.6.2` (only).
+
+### 26.5 Offline results on recorded gemma2:2b responses (exact lab, repository functions)
+
+The distances below are computed by the repository's own `_teacher_forced_log_likelihood`. It is fed the responses recorded on Kaggle and the prefill continuations recorded there by private kernels (`cd-smile-tf-ll`, `cd-smile-tf-ll-full`), with every position truncated to the pipeline's top 5. These kernels ran before the review fixes in 26.7: a row whose own generation ended early was bounded by `log ½` instead of being re-observed (step 3), and prefill calls kept the stop sequences. Both differences affect only rows that end before `y`.
+
+**Goal mode, 18 samples, by response signal:**
+
+| Response signal | Pass | AUC > 0.7 | Cons. < 0.05 | Stab. > 0.8 | R² > 0.9 | median AUC | median Stab. | median R² |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| First-token logprob JS (`v4.6.1` term) | 0/18 | 5 | 16 | 0 | 1 | 0.532 | 0.461 | 0.588 |
+| Word-set Jaccard (text only) | 0/18 | 7 | 15 | 0 | 2 | 0.548 | 0.558 | 0.620 |
+| Censored prefix log-likelihood drop | 0/18 | 5 | 15 | 0 | 1 | 0.577 | 0.510 | 0.586 |
+| **Teacher-forced log-likelihood drop (`v4.6.2`)** | **1/18** | 5 | 15 | 1 | 2 | 0.600 | 0.536 | 0.660 |
+
+**Full-prompt mode, 6 samples:**
+
+| Response signal | Pass | AUC > 0.7 | Cons. < 0.05 | Stab. > 0.8 | R² > 0.9 | median AUC | median Stab. | median R² |
+| :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Word-set Jaccard (text only) | 0/6 | 1 | 2 | 0 | 1 | 0.543 | 0.553 | 0.786 |
+| Censored prefix log-likelihood drop | 0/6 | 2 | 1 | 0 | 0 | 0.582 | 0.554 | 0.716 |
+| **Teacher-forced log-likelihood drop (`v4.6.2`)** | 0/6 | 1 | 1 | 0 | **4** | 0.590 | **0.736** | **0.926** |
+
+Per sample, teacher-forced signal:
+
+| Mode | Dataset | Sample | K | AUC | Consistency dist. | Stability | Weighted R² | Pass |
+| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | :---: |
+| goal | battery_qa | 0 | 4 | 1.000 | 0.000 | 0.766 | 0.856 | no |
+| goal | battery_qa | 1 | 4 | 1.000 | 0.000 | 0.636 | 0.652 | no |
+| goal | battery_qa | 2 | 4 | 0.667 | 0.000 | 0.694 | 0.587 | no |
+| goal | boolq | 0 | 8 | 0.500 | 0.000 | 0.391 | 0.598 | no |
+| goal | boolq | 1 | 8 | 0.600 | 0.000 | 0.486 | 0.590 | no |
+| goal | boolq | 2 | 11 | 0.321 | 0.009 | 0.407 | 0.348 | no |
+| goal | hellaswag | 0 | 8 | 0.600 | 0.000 | 0.653 | 0.853 | no |
+| goal | hellaswag | 1 | 15 | 0.722 | 0.207 | 0.718 | 0.757 | no |
+| goal | hellaswag | 2 | 34 | 0.446 | 0.339 | 0.525 | 0.202 | no |
+| goal | mmlu | 0 | 10 | 0.480 | 0.000 | 0.486 | 0.535 | no |
+| goal | mmlu | 1 | 8 | 0.467 | 0.000 | 0.499 | 0.595 | no |
+| goal | mmlu | 2 | 40 | 0.547 | 0.084 | 0.546 | 0.805 | no |
+| goal | piqa | 0 | 12 | 0.286 | 0.028 | 0.441 | 0.675 | no |
+| goal | piqa | 1 | 1 | 0.500 | 0.000 | 0.429 | 1.000 | no |
+| goal | piqa | 2 | 10 | 0.667 | 0.000 | 0.413 | 0.668 | no |
+| goal | trivia_qa_verified | 0 | 7 | 1.000 | 0.000 | 0.725 | 0.869 | no |
+| goal | trivia_qa_verified | 1 | 8 | 0.938 | 0.000 | 0.806 | 0.901 | **yes** |
+| goal | trivia_qa_verified | 2 | 12 | 0.629 | 0.007 | 0.588 | 0.625 | no |
+| full | battery_qa | 0 | 37 | 0.506 | 0.141 | 0.785 | 0.929 | no |
+| full | boolq | 0 | 234 | 0.530 | 0.608 | 0.459 | 0.781 | no |
+| full | hellaswag | 0 | 51 | 0.650 | 0.145 | 0.762 | 0.976 | no |
+| full | mmlu | 0 | 28 | 0.304 | 0.261 | 0.746 | 0.923 | no |
+| full | piqa | 0 | 90 | 0.691 | 0.120 | 0.545 | 0.966 | no |
+| full | trivia_qa_verified | 0 | 7 | 1.000 | 0.000 | 0.725 | 0.869 | no |
+
+**Cost.** Prefill calls per sample ranged from 58 (hellaswag 2, nearly all rows reproduce `y`) to 5,472 (battery full prompt). That is 1 s to 23 min of T4 time per sample for all 9 runs, typically 2–16 min, comparable to the time spent generating the rows. Ollama reuses the KV cache of the shared prefix.
+
+### 26.6 Why the thresholds are still not met: what the data show
+
+- **Stability is limited by the model, not the estimator.**
+  - On the same prompt, main vs seed-43 Ruzicka similarity is 0.96–1.00 for `K ≤ 15`.
+  - The injected filler carries under 0.10 of the attribution in most variants.
+  - On matched rows (same real-token mask, filler kept), the new drop correlates with the main run's at only r = 0.2–0.7 for boolq, mmlu and piqa (≥ 0.9 for trivia, battery and hellaswag 2). The filler changes how gemma2 responds to deletions.
+  - In full-prompt mode the lowest variants (`please`, `!`, `?` appended after `Answer:`) are exactly those where the variant's own response differs from the main response. Example (piqa): "Option 1 is better; ripped paper strips are safer for guinea pigs." becomes "**Answer:** Option 1 is better.". Stability compares explanations of two different responses.
+  - Re-targeting Stability variants to the main response would change what `xwhy_metrics.py` measures, so it was not done.
+- **R² in goal mode** (median 0.66) reflects strong token interactions in short scopes (`K ≤ 12`, most designs exhaustive): one deleted key word can flip the answer, which no additive surrogate represents. In full-prompt mode, where effects are spread over 28–234 tokens, the same signal reaches 0.92–0.98.
+- **Consistency** fails only for sampled designs (`K ≥ 15` in goal mode, `K ≥ 28` in full-prompt). Many tokens have small, continuous effects whose ranks the second seed's design reorders (Section 22).
+- **AUC** is bounded by the ground-truth definitions (Section 22). In full-prompt mode the model genuinely reacts to template tokens (`Answer:`, `Option`) that the ground truth labels irrelevant. In goal mode, numbers of two characters or fewer are labelled irrelevant.
+- **`/api/chat` vs `/api/generate` (Ollama 0.40.13).**
+  - Both endpoints render byte-identical prompts (`_debug_render_only`, 60/60).
+  - `/api/generate` is deterministic (60/60 regenerations identical).
+  - `/api/chat`, and raw-mode `/api/generate` on the same rendered prompt, agree with each other but differ from the non-raw generate path's greedy output on 15 of 60 prompts.
+  - Prefilled continuations reproduce the recorded tail in 52–54 of 60 prompts. The mismatches are mostly a final whitespace token that the generate path holds back before a stop sequence.
+  - So continuation segments come from a numerically slightly different path than the row's first segment. The signal is deterministic, but not bit-exact teacher forcing.
+
+### 26.7 Agents, independent review, and fixes
+
+Agents run during `v4.6.2`:
+- **Integrity auditor** (`v4.6.1` code): found no cheating.
+- **Paper mapper** (ESCI to XWhy).
+- **Forensics** of the coverage-run rows: found the formatting-token first-token logprob, the saturating responses, and the ground-truth caveats.
+- **Metric mathematician:** Stability needs total variation below 0.111, so an injected-token share below 0.111. Consistency for near-ties. R² ceilings for OR/AND responses.
+- **SOTA scout** (ContextCite, AttriBoT, MExGen, ReAGent, PECoRe, P-CXMI): every logprob-based method in the list explains the original response's likelihood.
+- **Compliance auditor:** the teacher-forced drop complies with Section III, with these conditions:
+  - raw generated tokens, never MC-expanded text;
+  - no change to `top_logprobs`;
+  - no silent per-row fallback;
+  - the same context for prefill and generation;
+  - corrected citations;
+  - censoring documented as a bound.
+- **Ollama source researcher:**
+  - prefill semantics;
+  - logprobs are log-softmax before sampling;
+  - end-of-sequence and stop tokens are never reported;
+  - there is no prompt-logprob API;
+  - prefix KV-cache reuse.
+- **Independent code reviewer** (given the diff, the brief and the Change-log, not the author's conclusions): found no integrity violation and four major issues, all fixed.
+
+| Severity | Finding | Resolution |
+| :--- | :--- | :--- |
+| Major | Prefill context can differ from the generation context (a chat template dropping a disabled-thinking block; rows recorded from the system-prompt `/api/chat` fallback) | Only `/api/generate` sequences are recorded; per-original prefill probe; failing originals are not scorable (26.3) |
+| Major | A continuation that stops at once returned `None`, so the row became `NaN`, and these are the rows whose answer changed most | `[]` for an immediate end; `None` only on transport failure or text without logprobs |
+| Major | Ablation fidelity: `NaN` turned into `0.0`; unbounded for signed drops | `_normalized_ablation_delta` (26.4) |
+| Major | Measure chosen per original prompt, so a Stability run could fall back to the text distance while Run 1 used the drop | Measure fixed per sample, recorded as `response_measure` |
+| Minor | A row ended by a trimmed stop sequence received the `log ½` bound although `y_t` may have been generated | Re-observed by a continuation; continuations have no stop sequences |
+| Minor | Sequence store and response cache evict differently | Sequence store sized 1,536 (> 1,024) |
+| Minor | No bound on repeated work | Per-sample memo |
+| Minor | Prefix rebuilt from token strings | Concatenation check on the original (all 46,054 recorded responses pass) |
+| Minor | `min_max` affinity unverified | Verified in upstream `DistanceNormalizer.min_max` |
+| Nit | Long lines, duplicated request setup, `ensure_ollama_alive` outside `try` | Fixed |
+
+Fixing the last major item exposed a pre-existing violation of rule #62: a Stability variation that raised was dropped from the mean. It is now reported missing (26.4).
+
+### 26.8 Verification
+
+- `python3 -W error -c "import ast; ast.parse(open('xwhy_core.py').read())"` passes.
+- `pyflakes` reports 0 issues in `xwhy_core.py` and no new issue in `xwhy_providers.py` or `xwhy_metrics.py`.
+- **Stubbed end-to-end smoke test** (real repository modules and real upstream `xwhy` source, heavy packages stubbed), using a toy language model with exact log-softmax distributions and Ollama-shaped payloads passed through the provider's own extraction code:
+  - the pipeline's distance equals the brute-force teacher-forced drop to `1e-9`, on identical rows and on rows that diverge and need prefill (`"Paris is the city"`, `"Lyon maybe"`);
+  - identical rows need no prefill call;
+  - an early stop is re-observed exactly;
+  - an immediate stop is bounded by `log ½`;
+  - a missing row gives `NaN`, and an unscorable original in a sample fixed to the drop gives `NaN`, not the text distance;
+  - `response_measure` is recorded for both measures;
+  - ablation normalisation is bounded and `NaN`-safe;
+  - one failed Stability variation makes Stability missing, while all 7 succeeding gives a score;
+  - the memory reclaim clears every new store;
+  - every `v4.6.1` smoke check still passes.
+- **Offline lab** on 18 goal and 6 full-prompt real gemma2 samples (26.5).
+- **Kaggle end-to-end validation** of the candidate, with the pinned commit plus the candidate files overlaid from a private dataset: 26.9.
+
+### 26.9 Kaggle end-to-end validation
+
+(Recorded when the runs complete.)
+
+### 26.10 Known limitations and honest expectations for `v4.6.2`
+
+- **The thresholds are still not met on most samples:** 1/18 goal and 0/6 full-prompt in the offline lab. 26.6 gives the data-backed reasons:
+  - filler words change gemma2:2b's behaviour or its response;
+  - answer flips in short scopes are not additive;
+  - small effects tie in sampled designs;
+  - the ground-truth definitions.
+
+  None of these can be removed without changing the metrics or the ground truth, or without the mechanisms Section III forbids.
+- **The teacher forcing is not bit-exact on Ollama 0.40.13.** Prefill continuations come from `/api/chat`. Its greedy output differs from the non-raw `/api/generate` path on 15 of 60 prompts, although the rendered prompts are byte-identical. Both paths are deterministic, so the signal is deterministic; where the two numerical paths differ, terms after a divergence are computed on the chat path.
+- **Cost.** Up to one extra Ollama call per divergence of each design row, and one probe per explained original. Measured: 58 to 5,472 calls per sample (all 9 runs), 1 s to 23 min on a T4.
+- **The quantity explained depends on the provider.** Providers with logprobs and prefill explain `log p(y | x)`; Anthropic and OpenAI chat keep the text distance.
+- **Censoring.** If `y_t` falls outside the top 5 at a divergence, its logprob is replaced by an upper bound, and an immediate end of sequence by `log ½`. Both bounds understate the drop on rows whose answer collapses.
+- **Unchanged pre-existing caveats (Section 22):**
+  - the rationale suffix makes responses quote prompt words, which the drop then explains;
+  - multiple-choice option expansion is still used by the text distance;
+  - the ground-truth labelling caveats.
+
+### 26.11 New "DO NOT REPEAT" guardrails (#63 – #68)
+
+63. **DO NOT REPEAT (`v4.6.1` finding): Explaining a distance between two generated texts, or between first-token distributions, when the model's log-likelihood is available.** Greedy decoding reformats answers when a filler word is inserted (25–80% of rows), and text distances measure the reformatting. Explain the likelihood of the original response.
+64. **DO NOT REPEAT (`v4.6.2` design): Censoring the likelihood at the first divergence.** A prefix-only drop measures the formatting token at which the output first diverges, not the answer. Continue the original prefix with prefill.
+65. **DO NOT REPEAT (`v4.6.2` review): Choosing the response measure per prompt or per row.** Fix it once per sample and record it (`response_measure`). An unavailable value is `NaN` (missing), never the other measure.
+66. **DO NOT REPEAT (`v4.6.2` review): Mixing generation contexts in one likelihood.** Record sequences only from the generation endpoint whose context the prefill reproduces, and probe the prefill path once per original.
+67. **DO NOT REPEAT (`v4.6.2` finding): Re-targeting Stability variants to the baseline's response to raise Stability.** Each run explains the model's response to its own prompt. When a filler changes that response, low Stability is the correct measurement.
+68. **DO NOT REPEAT (`v4.6.2` finding): Reading lab results for re-runs at budget 384 when the baseline design is exhaustive.** `xwhy_metrics.py` re-runs at the baseline's own `M` (`2^K` for `K ≤ 8`). An offline replica must do the same, or it scores prompts the pipeline never sends.
+
+### 26.12 References
+
+- Cohen-Wang, B., Shah, H., Georgiev, K., Mądry, A. *ContextCite: Attributing Model Generation to Context.* NeurIPS 2024.
+- Liu, F., Kandpal, N., Raffel, C. *AttriBoT: A Bag of Tricks for Efficiently Approximating Leave-One-Out Context Attribution.* ICLR 2025.
+- *Interpreting Black-Box Large Language Models with Sentence-Level Energy Landscapes* (ESCI), ACL submission (anonymous), 2026, Eq. 3 and the energy-drop analysis.
+- Deng, Y., Bakhtin, A., Ott, M., Szlam, A., Ranzato, M. *Residual Energy-Based Models for Text Generation.* ICLR 2020.
+- LeCun, Y., Chopra, S., Hadsell, R., Ranzato, M., Huang, F. J. *A Tutorial on Energy-Based Learning.* 2006.
+- Ollama source (v0.40.13): `server/routes.go` (`GenerateHandler`, `ChatHandler`, `_debug_render_only`), template rendering of a final assistant message, logprob computation before sampling.

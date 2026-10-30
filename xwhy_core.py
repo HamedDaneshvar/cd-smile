@@ -41,7 +41,9 @@ try:
     from .xwhy_providers import (
         MAX_RETRIES,
         OllamaThinkingSafeProvider,
+        LogprobSequence,
         _RECENT_OLLAMA_LOGPROBS,
+        _RECENT_OLLAMA_LOGPROB_SEQUENCES,
         _WMD_DISTANCE_CACHE,
         _compute_logprob_distribution_distance,
         _extract_logprob_distribution,
@@ -70,7 +72,9 @@ except ImportError:
     from xwhy_providers import (
         MAX_RETRIES,
         OllamaThinkingSafeProvider,
+        LogprobSequence,
         _RECENT_OLLAMA_LOGPROBS,
+        _RECENT_OLLAMA_LOGPROB_SEQUENCES,
         _WMD_DISTANCE_CACHE,
         _compute_logprob_distribution_distance,
         _extract_logprob_distribution,
@@ -102,6 +106,13 @@ _RATIONALE_SUFFIX_MARKER: Final[str] = "State the answer and key phrase from the
 # Bounded logprob snapshot store (mirrors the 1024 -> 768 FIFO bound of the provider response cache).
 _LOGPROB_SNAPSHOT_CAPACITY: Final[int] = 1024
 _LOGPROB_SNAPSHOT_RETAIN: Final[int] = 768
+# v4.6.2: per-position sequence store, sized above the 1024-entry response cache so that a row served
+# from that cache always still has the sequence it was generated with.
+_SEQUENCE_SNAPSHOT_CAPACITY: Final[int] = 1536
+_SEQUENCE_SNAPSHOT_RETAIN: Final[int] = 1152
+# v4.6.2: response measure fixed per sample (recorded as `response_measure` with every explanation).
+_LOG_LIKELIHOOD_MEASURE: Final[str] = "log_likelihood_drop"
+_TEXT_DISTANCE_MEASURE: Final[str] = "text_distance"
 
 
 def _augment_prompt_for_continuous_rationale(prompt: str) -> str:
@@ -161,6 +172,305 @@ def _snapshot_prompt_logprobs(provider: Any, model_name: str, prompt: str, queri
     store[(model_name, prompt)] = dist
 
 
+@dataclass(frozen=True)
+class _RecordedResponse:
+    """Generation recorded for one prompt (`v4.6.2`).
+
+    Attributes:
+        queried_prompt: Prompt actually sent to the model (rationale-augmented).
+        sequence: Per-position `(token, logprob, {alternative: logprob})` of the response.
+    """
+
+    queried_prompt: str
+    sequence: LogprobSequence
+
+
+@dataclass(frozen=True)
+class _PinnedOriginal:
+    """Original generation of one explanation and whether teacher forcing can score it (`v4.6.2`).
+
+    Attributes:
+        record: Recorded generation of the unperturbed prompt, or `None` when not recorded.
+        scorable: Whether the response log-likelihood drop is defined for this original.
+    """
+
+    record: _RecordedResponse | None
+    scorable: bool
+
+
+def _provider_dict(provider: Any, attr: str) -> dict[Any, Any] | None:
+    """Return (creating on first use) a per-sample dict store on `provider`, or `None` if it cannot hold one."""
+    store = getattr(provider, attr, None)
+    if isinstance(store, dict):
+        return store
+    try:
+        setattr(provider, attr, {})
+    except Exception:
+        return None
+    return getattr(provider, attr)
+
+
+def _bounded_put(store: dict[Any, Any], key: Any, value: Any, capacity: int, retain: int) -> None:
+    """Insert `key` at the newest end of `store`, evicting least-recently-written entries beyond `capacity`."""
+    store.pop(key, None)
+    if len(store) >= capacity:
+        for old_key in list(store.keys())[: len(store) - retain]:
+            store.pop(old_key, None)
+    store[key] = value
+
+
+def _snapshot_prompt_logprob_sequence(provider: Any, model_name: str, prompt: str, queried_prompt: str) -> None:
+    """Keep the per-position logprobs of `prompt`'s response in a bounded provider-scoped store (`v4.6.2`).
+
+    Same keys and least-recently-written eviction as `_snapshot_prompt_logprobs`, with a capacity
+    above the provider's 1024-entry response cache, so every design row (including rows served
+    from that cache) keeps the sequence it was generated with, and the prompt it was generated
+    from, until the per-sample memory reclaim clears the store.
+
+    Args:
+        provider: Provider instance that owns the snapshot store.
+        model_name: Model identifier passed to `.answer`.
+        prompt: Prompt as seen by the explainer (lookup key).
+        queried_prompt: Prompt actually sent to the model (rationale-augmented).
+
+    Returns:
+        None: Updates `provider._xwhy_logprob_sequence_snapshots` in place.
+    """
+    sequence = _RECENT_OLLAMA_LOGPROB_SEQUENCES.get((model_name, queried_prompt))
+    sequence = sequence or _RECENT_OLLAMA_LOGPROB_SEQUENCES.get(("", queried_prompt))
+    store = _provider_dict(provider, "_xwhy_logprob_sequence_snapshots") if sequence else None
+    if store is None:
+        return
+    record = _RecordedResponse(queried_prompt=queried_prompt, sequence=sequence)
+    _bounded_put(store, (model_name, prompt), record, _SEQUENCE_SNAPSHOT_CAPACITY, _SEQUENCE_SNAPSHOT_RETAIN)
+
+
+def _lookup_recorded_response(explainer: Any, prompt_str: str) -> _RecordedResponse | None:
+    """Return the recorded generation for `prompt_str`, keyed strictly by prompt (`v4.6.2`).
+
+    Args:
+        explainer: Active explainer (provider and model name).
+        prompt_str: Prompt as seen by the explainer.
+
+    Returns:
+        _RecordedResponse | None: Queried prompt and per-position logprobs, or `None` when not recorded.
+    """
+    provider = getattr(getattr(explainer, "state", None), "provider", None) if explainer is not None else None
+    model_name = str(getattr(getattr(explainer, "config", None), "model_name", "") or "")
+    store = getattr(provider, "_xwhy_logprob_sequence_snapshots", None) if provider is not None else None
+    if isinstance(store, dict) and store.get((model_name, prompt_str)):
+        return store[(model_name, prompt_str)]
+    queried = _augment_prompt_for_continuous_rationale(prompt_str)
+    for sent in dict.fromkeys((queried, prompt_str)):
+        for key in ((model_name, sent), ("", sent)):
+            if _RECENT_OLLAMA_LOGPROB_SEQUENCES.get(key):
+                return _RecordedResponse(queried_prompt=sent, sequence=_RECENT_OLLAMA_LOGPROB_SEQUENCES[key])
+    return None
+
+
+def _pinned_original(explainer: Any, original_prompt: str, original_output: str) -> _PinnedOriginal:
+    """Return the original prompt's generation and its scorability, pinned for the sample (`v4.6.2`).
+
+    Every design row of an explanation, its Stability/Consistency re-runs, and the ablation check
+    compare against the original response, so it is copied on first use into a small
+    provider-scoped store that row snapshots cannot evict; the per-sample memory reclaim clears it.
+    The original is scorable by teacher forcing only when all of the following hold, each checked
+    once here:
+
+    - decoding is greedy (temperature 0), which the stop bound of `_teacher_forced_log_likelihood`
+      relies on;
+    - the provider offers prefilled continuation (`continue_with_logprobs`);
+    - the recorded tokens concatenate to the response text, so prefixes of `y` can be rebuilt;
+    - prefilling the first token of `y` under the original prompt makes the model continue with the
+      second, i.e. the prefill path renders the same context as the generation path (it would not,
+      for example, if a chat template dropped a disabled-thinking block once an assistant turn is
+      prefilled).
+
+    Args:
+        explainer: Active explainer (provider, model name, temperature).
+        original_prompt: Unperturbed prompt as seen by the explainer.
+        original_output: Response text of the unperturbed prompt.
+
+    Returns:
+        _PinnedOriginal: The recorded original (or `None`) and whether it can be scored.
+    """
+    provider = getattr(getattr(explainer, "state", None), "provider", None) if explainer is not None else None
+    config = getattr(explainer, "config", None)
+    model_name = str(getattr(config, "model_name", "") or "")
+    pinned = _provider_dict(provider, "_xwhy_original_logprob_sequences") if provider is not None else None
+    if pinned is not None and (model_name, original_prompt) in pinned:
+        return pinned[(model_name, original_prompt)]
+    record = _lookup_recorded_response(explainer, original_prompt)
+    continue_fn = getattr(provider, "continue_with_logprobs", None)
+    temperature = getattr(config, "temperature", TEMPERATURE)
+    tokens = [token for token, _logprob, _alternatives in record.sequence] if record is not None else []
+    scorable = (
+        bool(tokens)
+        and callable(continue_fn)
+        and float(temperature if temperature is not None else TEMPERATURE) == 0.0
+        and "".join(tokens).strip() == str(original_output or "").strip()
+    )
+    if scorable and len(tokens) >= 2:
+        probe = continue_fn(prompt=record.queried_prompt, assistant_prefix=tokens[0], model=model_name, max_tokens=1)
+        scorable = bool(probe) and probe[0][0] == tokens[1]
+    result = _PinnedOriginal(record=record, scorable=scorable)
+    if pinned is not None:
+        key = (model_name, original_prompt)
+        _bounded_put(pinned, key, result, _LOGPROB_SNAPSHOT_CAPACITY, _LOGPROB_SNAPSHOT_RETAIN)
+    return result
+
+
+def _teacher_forced_log_likelihood(
+    original: LogprobSequence,
+    row: LogprobSequence,
+    continue_from: Callable[[str, int], LogprobSequence | None],
+) -> float | None:
+    r"""Teacher-forced log-likelihood of the original response under a perturbed prompt (`v4.6.2`).
+
+    With $y = (y_0, \dots, y_{L-1})$ the tokens of the original response and $\tilde{x}$ the
+    perturbed prompt, returns $\log p(y \mid \tilde{x}) = \sum_t \log p(y_t \mid \tilde{x}, y_{<t})$,
+    the response log-likelihood regressed by ContextCite (Cohen-Wang et al., *NeurIPS* 2024) and
+    differenced by AttriBoT (Liu et al., *ICLR* 2025). Servers such as Ollama expose logprobs of
+    generated tokens only, so the sum is assembled from greedy generations:
+
+    1. While a segment reproduces $y$, the histories are identical and its logprobs are the exact
+       terms. The first segment is the row's own generation `row`.
+    2. At the first position $t$ where a segment leaves $y$, the term for $y_t$ is read from that
+       position's top-k alternatives. If $y_t$ is not listed, $\log p(y_t) \le$ the smallest listed
+       logprob, which is used (a right-censored term: it can only understate the drop).
+    3. If the row's own generation ended before $t$ (end of sequence, or a stop sequence whose
+       tokens the server trims), the distribution at $t$ is read from `continue_from(y_{<t}, ...)`.
+       A continuation is generated without stop sequences, so when it is empty (or ends before
+       $t$) the end-of-sequence token was the greedy choice at $t$: $p(y_t) \le 1/2$, and
+       $\log(1/2)$ is used as the bound.
+    4. The prefix $y_{\le t}$ is prefilled as the assistant turn, `continue_from(prefix, L - t - 1)`
+       returns the greedy continuation, and the scan resumes at step 1 on it.
+
+    Rows whose generation equals $y$ need no extra call; every diverging position costs one.
+
+    Args:
+        original: Per-position logprobs of the original response (its tokens define $y$).
+        row: Per-position logprobs of the greedy response to the perturbed prompt.
+        continue_from: `continue_from(prefix_text, max_tokens)` returns the greedy continuation of
+            a prefilled assistant turn for the perturbed prompt, or `None` on failure.
+
+    Returns:
+        float | None: $\log p(y \mid \tilde{x})$, or `None` when a continuation failed.
+    """
+    tokens = [token for token, _logprob, _alternatives in original]
+    n_tokens = len(tokens)
+    total = 0.0
+    start = 0
+    segment = row
+    segment_is_row = True
+    while start < n_tokens:
+        offset = 0
+        while offset < len(segment) and start + offset < n_tokens and segment[offset][0] == tokens[start + offset]:
+            total += float(segment[offset][1])
+            offset += 1
+        position = start + offset
+        if position >= n_tokens:
+            break
+        if offset < len(segment):
+            alternatives = segment[offset][2]
+            target = tokens[position]
+            total += float(alternatives[target] if target in alternatives else min(alternatives.values()))
+        elif segment_is_row:
+            continuation = continue_from("".join(tokens[:position]), n_tokens - position)
+            if continuation is None:
+                return None
+            segment, start, segment_is_row = continuation, position, False
+            if continuation:
+                continue
+            total += math.log(0.5)
+        else:
+            total += math.log(0.5)
+        start = position + 1
+        if start >= n_tokens:
+            break
+        continuation = continue_from("".join(tokens[:start]), n_tokens - start)
+        if continuation is None:
+            return None
+        segment, segment_is_row = continuation, False
+    return total
+
+
+def _response_measure_state(explainer: Any) -> dict[str, str] | None:
+    """Per-sample record of the response measure fixed at the sample's first distance (`v4.6.2`)."""
+    provider = getattr(getattr(explainer, "state", None), "provider", None) if explainer is not None else None
+    return _provider_dict(provider, "_xwhy_response_measure") if provider is not None else None
+
+
+def _active_response_measure(explainer: Any) -> str:
+    """Name of the response measure in force for the current sample (`v4.6.2`)."""
+    state = _response_measure_state(explainer)
+    return str(state.get("measure", _TEXT_DISTANCE_MEASURE)) if state else _TEXT_DISTANCE_MEASURE
+
+
+def _response_log_likelihood_drop(
+    explainer: Any,
+    original_prompt: str,
+    perturbed_prompt: str,
+    original_output: str,
+) -> float | None:
+    r"""Drop $\log p(y \mid x) - \log p(y \mid \tilde{x})$ of the original response $y$ (`v4.6.2`).
+
+    The response measure is fixed once per sample, at its first distance (the baseline run): the
+    log-likelihood drop when that run's original is scorable (`_pinned_original`), else the text
+    distance. Every later explanation of the sample (Stability variants, the Consistency re-run,
+    the ablation check) uses the same measure; an original that cannot be scored under a sample
+    fixed to the drop yields `NaN` rows (the explanation fails and its metric is reported
+    missing), never a switch to the text distance. Values are memoised per sample, so a prompt
+    repeated by the Consistency re-run costs no further calls. The drop compares the model's own
+    output distribution on the original response, never prompt text.
+
+    Args:
+        explainer: Active explainer (provider, model name, temperature).
+        original_prompt: Unperturbed prompt as seen by the explainer.
+        perturbed_prompt: Perturbed prompt as seen by the explainer.
+        original_output: Response text of the unperturbed prompt.
+
+    Returns:
+        float | None: The drop (0 for the unperturbed prompt); `NaN` for an invalid row (missing
+            generation, failed continuation, or an unscorable original in a sample fixed to the
+            drop); `None` when the sample uses the text distance.
+    """
+    state = _response_measure_state(explainer)
+    if state is None or not original_prompt or state.get("measure") == _TEXT_DISTANCE_MEASURE:
+        return None
+    provider = explainer.state.provider
+    model_name = str(getattr(getattr(explainer, "config", None), "model_name", "") or "")
+    memo = _provider_dict(provider, "_xwhy_log_likelihood_memo")
+    memo_key = (model_name, original_prompt, perturbed_prompt)
+    if memo is not None and memo_key in memo:
+        return memo[memo_key]
+    original = _pinned_original(explainer, original_prompt, original_output)
+    if "measure" not in state:
+        state["measure"] = _LOG_LIKELIHOOD_MEASURE if original.scorable else _TEXT_DISTANCE_MEASURE
+        if not original.scorable:
+            return None
+    value = float("nan")
+    if original.scorable and perturbed_prompt == original_prompt:
+        value = 0.0
+    elif original.scorable:
+        row = _lookup_recorded_response(explainer, perturbed_prompt)
+        if row is not None:
+            continue_fn = provider.continue_with_logprobs
+
+            def _continue_from(prefix: str, max_tokens: int) -> LogprobSequence | None:
+                """Continue the prefilled original prefix under the row's own queried prompt."""
+                return continue_fn(
+                    prompt=row.queried_prompt, assistant_prefix=prefix, model=model_name, max_tokens=max_tokens
+                )
+
+            log_lik = _teacher_forced_log_likelihood(original.record.sequence, row.sequence, _continue_from)
+            if log_lik is not None:
+                value = float(sum(float(lp) for _token, lp, _alternatives in original.record.sequence) - log_lik)
+    if memo is not None:
+        _bounded_put(memo, memo_key, value, _SEQUENCE_SNAPSHOT_CAPACITY, _SEQUENCE_SNAPSHOT_RETAIN)
+    return value
+
+
 def wrap_provider_with_rationale_inference(provider: Any) -> Any:
     """Wrap a provider's `.answer` method so benchmark queries elicit a concise one-line answer + key phrase (`v4.4.5`).
 
@@ -196,6 +506,7 @@ def wrap_provider_with_rationale_inference(provider: Any) -> Any:
         res = orig_cached_answer(aug_prompt, *args, **kwargs)
         model_n = str(kwargs.get("model", "") or "")
         _snapshot_prompt_logprobs(provider, model_n, str(prompt), aug_prompt)
+        _snapshot_prompt_logprob_sequence(provider, model_n, str(prompt), aug_prompt)
         if aug_prompt != prompt:
             if (model_n, aug_prompt) in _RECENT_OLLAMA_LOGPROBS:
                 _RECENT_OLLAMA_LOGPROBS[(model_n, str(prompt))] = _RECENT_OLLAMA_LOGPROBS[(model_n, aug_prompt)]
@@ -614,8 +925,20 @@ def compute_genuine_semantic_distance(
     perturbed_prompt: str = "",
     strict_prompt_lookup: bool = False,
 ) -> float:
-    """Compute genuine multi-granular semantic distance with Contrastive Set-Difference WMD (Kusner et al., ICML 2015).
+    """Compute the response distance: response log-likelihood drop, else multi-granular text distance.
 
+    `v4.6.2`: when the provider can score responses (the original prompt's generation was recorded
+    with per-position logprobs and the provider offers prefilled continuation), the distance of
+    every row is the teacher-forced log-likelihood drop of the ORIGINAL response,
+    `log p(y | x) - log p(y | x~)` (`_response_log_likelihood_drop`; ContextCite, Cohen-Wang et al.,
+    NeurIPS 2024; AttriBoT, Liu et al., ICLR 2025). It is continuous in the model's output
+    distribution and does not change when greedy decoding merely reformats an answer, unlike a
+    distance between two generated texts or between their first-token distributions. A row whose
+    generation or continuation is missing gets `NaN` (invalid), never a different formula. The
+    signed drop can be negative (a deletion that makes `y` more likely); `min_max` normalisation is
+    affine and keeps that information.
+
+    Otherwise (providers without logprobs or prefill), the text distance below is used for every row.
     Enriches short multiple-choice outputs (`'1'`, `'2'`, `'A'`, `'B'`) with their option
     text from `prompt_context`, computes full-string semantic distance via `explainer.calculate_distance`
     or `WMDDistance.compute` (with case-aware `resolve_word2vec_tokens`), blends with Contrastive
@@ -634,8 +957,12 @@ def compute_genuine_semantic_distance(
             set for perturbation-design rows so every row's distance uses its own prompt.
 
     Returns:
-        float: Non-negative semantic transport distance between the two model responses.
+        float: Response log-likelihood drop (may be negative or `NaN`), or the non-negative text
+            distance between the two model responses.
     """
+    log_lik_drop = _response_log_likelihood_drop(explainer, original_prompt, perturbed_prompt, original_output)
+    if log_lik_drop is not None:
+        return log_lik_drop
     orig_lp = _lookup_prompt_logprobs(
         explainer,
         original_prompt,
@@ -1642,6 +1969,7 @@ class _PerturbationFit:
     weights: Any
     constant_response: bool
     method: str
+    response_measure: str
 
     @property
     def kernel_effective_sample_size(self) -> float:
@@ -1782,6 +2110,7 @@ def _query_and_fit_perturbations(
         weights=weights,
         constant_response=constant_response,
         method=_surrogate_method_name(x_arr),
+        response_measure=_active_response_measure(explainer),
     )
 
 
@@ -2134,6 +2463,7 @@ def apply_xwhy_smile_enhancements() -> None:
                 "y_target": fit.y_target,
                 "y_pred": fit.y_pred,
                 "best_surrogate_method": fit.method,
+                "response_measure": fit.response_measure,
                 "constant_response": fit.constant_response,
                 "status": fit.status,
             }
@@ -3935,6 +4265,7 @@ def direct_scoped_explain(
             "weighted_r2": r2_score,
             "r2": r2_score,
             "best_surrogate": fit.method,
+            "response_measure": fit.response_measure,
             "kernel_effective_sample_size": fit.kernel_effective_sample_size,
             "constant_response": fit.constant_response,
             "status": fit.status,

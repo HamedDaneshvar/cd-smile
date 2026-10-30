@@ -24,6 +24,7 @@ import string
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from typing import Any, Final, Literal
 import urllib.request
 
@@ -395,6 +396,52 @@ def strip_thinking_blocks(raw_text: str, fallback_reasoning: str = "") -> str:
 
 
 _RECENT_OLLAMA_LOGPROBS: dict[tuple[str, str], dict[str, float]] = {}
+# v4.6.2: every generated position (token, logprob, top-k alternatives), same keys and bound as above.
+LogprobSequence = list[tuple[str, float, dict[str, float]]]
+_RECENT_OLLAMA_LOGPROB_SEQUENCES: dict[tuple[str, str], LogprobSequence] = {}
+
+
+def _extract_logprob_sequence(raw_payload: Any) -> LogprobSequence | None:
+    """Extract every generated position's token, logprob, and top-k alternatives (`v4.6.2`).
+
+    Accepts Ollama `/api/generate` and `/api/chat` payloads (`logprobs` or `message.logprobs`:
+    a list of `{"token", "logprob", "top_logprobs"}`) and OpenAI-style `choices[0].logprobs.content`.
+
+    Args:
+        raw_payload: Raw provider response payload.
+
+    Returns:
+        LogprobSequence | None: One `(token, logprob, {alternative: logprob})` per generated
+            position (the chosen token is always among the alternatives), or `None` when the
+            payload carries no per-position logprobs.
+    """
+    if not isinstance(raw_payload, dict):
+        return None
+    seq: Any = raw_payload.get("logprobs")
+    if seq is None and isinstance(raw_payload.get("message"), dict):
+        seq = raw_payload["message"].get("logprobs")
+    if seq is None and isinstance(raw_payload.get("choices"), list) and raw_payload["choices"]:
+        first_choice = raw_payload["choices"][0]
+        seq = first_choice.get("logprobs") if isinstance(first_choice, dict) else None
+    if isinstance(seq, dict):
+        seq = seq.get("content")
+    if not isinstance(seq, list):
+        return None
+    positions: LogprobSequence = []
+    for item in seq:
+        if not isinstance(item, dict) or item.get("token") is None:
+            return None
+        token = str(item["token"])
+        alternatives: dict[str, float] = {}
+        for alt in item.get("top_logprobs") or []:
+            if isinstance(alt, dict) and alt.get("token") is not None and alt.get("logprob") is not None:
+                alternatives[str(alt["token"])] = float(alt["logprob"])
+        if item.get("logprob") is None and token not in alternatives:
+            return None
+        chosen = float(item["logprob"]) if item.get("logprob") is not None else alternatives[token]
+        alternatives.setdefault(token, chosen)
+        positions.append((token, chosen, alternatives))
+    return positions or None
 
 
 def _extract_logprob_distribution(raw_payload: Any) -> dict[str, float] | None:
@@ -501,8 +548,24 @@ _OLLAMA_STOP_SEQUENCES: Final[list[str]] = [
 ]
 
 
-def _record_raw_ollama_logprobs(model_tag: str, prompt: str, response_text: str, data: dict[str, Any]) -> None:
-    """Record extracted logprob distribution from an Ollama response payload if available."""
+def _record_raw_ollama_logprobs(
+    model_tag: str,
+    prompt: str,
+    response_text: str,
+    data: dict[str, Any],
+    record_sequence: bool = True,
+) -> None:
+    """Record extracted logprob distribution from an Ollama response payload if available.
+
+    Args:
+        model_tag: Ollama model tag.
+        prompt: Prompt sent to the model.
+        response_text: Cleaned response text.
+        data: Raw response payload.
+        record_sequence: Also keep the per-position sequence (`v4.6.2`). Only `/api/generate`
+            responses are kept, so every recorded sequence comes from the same context
+            (no system prompt) as the prefill continuations that extend it.
+    """
     dist = _extract_logprob_distribution(data)
     if dist:
         if len(_RECENT_OLLAMA_LOGPROBS) >= 512:
@@ -512,6 +575,13 @@ def _record_raw_ollama_logprobs(model_tag: str, prompt: str, response_text: str,
         _RECENT_OLLAMA_LOGPROBS[(str(model_tag), str(prompt))] = dist
         _RECENT_OLLAMA_LOGPROBS[("", str(prompt))] = dist
         _RECENT_OLLAMA_LOGPROBS[("__resp__", str(response_text))] = dist
+    sequence = _extract_logprob_sequence(data) if record_sequence else None
+    if sequence:
+        if len(_RECENT_OLLAMA_LOGPROB_SEQUENCES) >= 512:
+            for old_k in list(_RECENT_OLLAMA_LOGPROB_SEQUENCES.keys())[: len(_RECENT_OLLAMA_LOGPROB_SEQUENCES) - 384]:
+                _RECENT_OLLAMA_LOGPROB_SEQUENCES.pop(old_k, None)
+        _RECENT_OLLAMA_LOGPROB_SEQUENCES[(str(model_tag), str(prompt))] = sequence
+        _RECENT_OLLAMA_LOGPROB_SEQUENCES[("", str(prompt))] = sequence
 
 
 def _compute_logprob_distribution_distance(
@@ -561,6 +631,21 @@ def _get_ollama_http_session() -> Any:
     return _OLLAMA_HTTP_SESSION
 
 
+def _ollama_native_base(base_url: str) -> str:
+    """Return the Ollama daemon's native API base URL (no trailing slash or `/v1` suffix)."""
+    clean_base = base_url.rstrip("/")
+    return clean_base[:-3].rstrip("/") if clean_base.endswith("/v1") else clean_base
+
+
+def _ollama_post_fn() -> Callable[..., Any]:
+    """Return `requests.post`, or the pooled keep-alive session's `post` unless `requests.post` is patched."""
+    import requests
+
+    if hasattr(requests.post, "_mock_name") or getattr(requests.post, "__name__", "") != "post":
+        return requests.post
+    return _get_ollama_http_session().post
+
+
 def ollama_generate_non_empty(
     model_tag: str,
     prompt: str,
@@ -588,18 +673,9 @@ def ollama_generate_non_empty(
     Returns:
         str: Non-empty cleaned model response string, or empty string if all strategies fail.
     """
-    import requests
-
     ensure_ollama_alive()
-    clean_base = base_url.rstrip("/")
-    if clean_base.endswith("/v1"):
-        clean_base = clean_base[:-3].rstrip("/")
-
-    post_fn = (
-        requests.post
-        if hasattr(requests.post, "_mock_name") or getattr(requests.post, "__name__", "") != "post"
-        else _get_ollama_http_session().post
-    )
+    clean_base = _ollama_native_base(base_url)
+    post_fn = _ollama_post_fn()
 
     global _OLLAMA_SUPPORTS_LOGPROBS
 
@@ -728,7 +804,7 @@ def ollama_generate_non_empty(
                     last_reasoning = thinking_trace
                 cleaned = strip_thinking_blocks(raw_content, fallback_reasoning="")
                 if cleaned:
-                    _record_raw_ollama_logprobs(model_tag, prompt, cleaned, data)
+                    _record_raw_ollama_logprobs(model_tag, prompt, cleaned, data, record_sequence=False)
                     return cleaned
         except Exception as exc:  # noqa: BLE001
             LOGGER.debug("Ollama /api/chat attempt (budget=%d) failed: %s", budget, exc)
@@ -778,7 +854,7 @@ def ollama_generate_non_empty(
             )
             cleaned = strip_thinking_blocks(raw_content, fallback_reasoning=thinking_trace)
             if cleaned:
-                _record_raw_ollama_logprobs(model_tag, prompt, cleaned, v1_data)
+                _record_raw_ollama_logprobs(model_tag, prompt, cleaned, v1_data, record_sequence=False)
                 return cleaned
     except Exception as exc:  # noqa: BLE001
         LOGGER.debug("Ollama /v1/chat/completions fallback failed: %s", exc)
@@ -787,6 +863,75 @@ def ollama_generate_non_empty(
     if last_reasoning:
         return strip_thinking_blocks("", fallback_reasoning=last_reasoning)
     return ""
+
+
+def ollama_continue_logprob_sequence(
+    model_tag: str,
+    prompt: str,
+    assistant_prefix: str,
+    max_tokens: int,
+    base_url: str = "http://127.0.0.1:11434",
+    timeout: int = 300,
+) -> LogprobSequence | None:
+    """Continue a prefilled assistant turn greedily and return the continuation's per-position logprobs (`v4.6.2`).
+
+    Sends `prompt` as the user turn and `assistant_prefix` as a trailing assistant message to
+    Ollama's native `/api/chat`. The chat template renders a final assistant message without an
+    end-of-turn token, so the model continues it (assistant prefill). Temperature, `num_ctx`,
+    `think=False` and top-5 logprobs match `ollama_generate_non_empty`. Stop sequences are left out:
+    they only truncate output (the server trims their tokens and logprobs) and never change a
+    logit, so every continuation position is reported and an early end means end of sequence.
+    Used to score a fixed response token by token (teacher forcing) where the server exposes no
+    prompt logprobs.
+
+    Args:
+        model_tag: Target Ollama model tag.
+        prompt: User prompt exactly as it was sent for the original generation.
+        assistant_prefix: Response prefix the model must continue.
+        max_tokens: Maximum number of continuation tokens.
+        base_url: Base URL of the local Ollama daemon.
+        timeout: HTTP request timeout in seconds.
+
+    Returns:
+        LogprobSequence | None: One `(token, logprob, {alternative: logprob})` per continuation
+            position, an empty list when the model ends the turn at once, or `None` when the request
+            fails or text comes back without logprobs.
+    """
+    if not _OLLAMA_SUPPORTS_LOGPROBS:
+        return None
+    thinking_model = is_thinking_model_tag(model_tag)
+    messages = [{"role": "user", "content": prompt}]
+    if assistant_prefix:
+        messages.append({"role": "assistant", "content": assistant_prefix})
+    payload: dict[str, Any] = {
+        "model": model_tag,
+        "messages": messages,
+        "stream": False,
+        "options": {
+            "temperature": 0.0,
+            "num_predict": max(1, int(max_tokens)),
+            "num_ctx": 2048 if thinking_model else 1024,
+        },
+        "logprobs": True,
+        "top_logprobs": 5,
+    }
+    if thinking_model:
+        payload["think"] = False
+    try:
+        ensure_ollama_alive()
+        resp = _ollama_post_fn()(f"{_ollama_native_base(base_url)}/api/chat", json=payload, timeout=timeout)
+        if not resp.ok:
+            LOGGER.debug("Ollama prefill continuation failed (%d): %s", resp.status_code, resp.text[:200])
+            return None
+        data = resp.json()
+        sequence = _extract_logprob_sequence(data)
+        if sequence is not None:
+            return sequence
+        content = str((data.get("message") or {}).get("content") or "")
+    except Exception as exc:  # noqa: BLE001
+        LOGGER.debug("Ollama prefill continuation failed: %s", exc)
+        return None
+    return [] if not content else None
 
 
 @dataclass
@@ -935,6 +1080,33 @@ class OllamaThinkingSafeProvider(OpenAIProvider):
                 pass
         super().__init__(client)
         self._ollama_base_url = base_url
+
+    def continue_with_logprobs(
+        self,
+        *,
+        prompt: str,
+        assistant_prefix: str,
+        model: str,
+        max_tokens: int,
+    ) -> LogprobSequence | None:
+        """Continue a prefilled assistant turn with per-position logprobs (`ollama_continue_logprob_sequence`).
+
+        Args:
+            prompt: User prompt exactly as sent for the original generation.
+            assistant_prefix: Response prefix the model must continue.
+            model: Target Ollama model tag.
+            max_tokens: Maximum number of continuation tokens.
+
+        Returns:
+            LogprobSequence | None: Continuation positions, or `None` when unavailable.
+        """
+        return ollama_continue_logprob_sequence(
+            model_tag=model,
+            prompt=prompt,
+            assistant_prefix=assistant_prefix,
+            max_tokens=max_tokens,
+            base_url=self._ollama_base_url,
+        )
 
     def _generate(
         self,
@@ -1473,6 +1645,7 @@ def _reclaim_sample_memory(
     """Free per-sample WMD/logprob/provider caches, strip heavy raw_data arrays, close figures, and trim C heap."""
     _WMD_DISTANCE_CACHE.clear()
     _RECENT_OLLAMA_LOGPROBS.clear()
+    _RECENT_OLLAMA_LOGPROB_SEQUENCES.clear()
     _CANONICAL_RESPONSE_CACHE.clear()
     if explainer is not None:
         prov_obj = getattr(getattr(explainer, "state", None), "provider", None)
@@ -1480,9 +1653,16 @@ def _reclaim_sample_memory(
         if isinstance(smile_cache, dict):
             smile_cache.clear()
         # v4.6.0: per-prompt logprob snapshots (xwhy_core._snapshot_prompt_logprobs) live and die with the cache.
-        logprob_snapshots = getattr(prov_obj, "_xwhy_logprob_snapshots", None)
-        if isinstance(logprob_snapshots, dict):
-            logprob_snapshots.clear()
+        for snapshot_attr in (
+            "_xwhy_logprob_snapshots",
+            "_xwhy_logprob_sequence_snapshots",
+            "_xwhy_original_logprob_sequences",
+            "_xwhy_log_likelihood_memo",
+            "_xwhy_response_measure",
+        ):
+            logprob_snapshots = getattr(prov_obj, snapshot_attr, None)
+            if isinstance(logprob_snapshots, dict):
+                logprob_snapshots.clear()
     if result is not None and hasattr(result, "raw_data") and isinstance(result.raw_data, dict):
         keys_to_strip = (
             ("perturbed_texts", "text_distances", "similarities", "weights", "y_target", "y_pred")

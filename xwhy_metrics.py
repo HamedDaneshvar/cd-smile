@@ -727,6 +727,7 @@ def evaluate_explanation_stability(
     sims: list[float] = []
     dists: list[float] = []
     details: list[dict[str, Any]] = []
+    failed_variations: list[str] = []
 
     full_words = prompt_text.split()
     base_indices: list[int] = []
@@ -861,9 +862,13 @@ def evaluate_explanation_stability(
             })
         except Exception as exc:  # noqa: BLE001
             LOGGER.warning("Stability evaluation variation '%s' failed: %s", var_id, exc)
+            failed_variations.append(var_id)
 
-    mean_sim = float(sum(sims) / len(sims)) if sims else None
-    mean_dist = float(sum(dists) / len(dists)) if dists else None
+    # v4.6.2 (DO-NOT-REPEAT #62): a failed variation makes Stability missing; never average the survivors.
+    mean_sim = float(sum(sims) / len(sims)) if sims and not failed_variations else None
+    mean_dist = float(sum(dists) / len(dists)) if dists and not failed_variations else None
+    if failed_variations:
+        LOGGER.warning("Stability not evaluated: variation(s) %s failed.", ", ".join(failed_variations))
 
     if details:
         LOGGER.info("\n%s", "=" * 90)
@@ -877,12 +882,15 @@ def evaluate_explanation_stability(
                 d["jaccard_distance"],
             )
         LOGGER.info("%s", "-" * 90)
-        LOGGER.info(
-            "  %-18s | Jaccard Similarity: %.4f | Distance: %.4f",
-            "OVERALL MEAN",
-            mean_sim,
-            mean_dist,
-        )
+        if mean_sim is not None:
+            LOGGER.info(
+                "  %-18s | Jaccard Similarity: %.4f | Distance: %.4f",
+                "OVERALL MEAN",
+                mean_sim,
+                mean_dist,
+            )
+        else:
+            LOGGER.info("  %-18s | missing (a variation failed)", "OVERALL MEAN")
         LOGGER.info("%s\n", "=" * 90)
 
     _RECENT_OLLAMA_LOGPROBS.clear()
@@ -1173,6 +1181,28 @@ def _construct_ablated_prompts(
     return top_prompt, bot_prompt
 
 
+def _normalized_ablation_delta(d_top: float, d_bot: float) -> tuple[float | None, float | None]:
+    """Return `(delta / max(|d_top|, |d_bot|), delta)` with `delta = d_top - d_bot` (`v4.6.2`).
+
+    Identical to the earlier `max(d_top, d_bot)` normalisation for non-negative text distances.
+    The response log-likelihood drop is signed (a deletion can make the original response more
+    likely), so the magnitudes are used, which keeps the score in `[-2, 2]`. A non-finite
+    distance (an invalid row) gives `(None, None)`, a missing score, never a made-up 0.
+
+    Args:
+        d_top: Distance after ablating the top-k attributed tokens.
+        d_bot: Distance after ablating the bottom-k attributed tokens.
+
+    Returns:
+        tuple[float | None, float | None]: Normalised fidelity and raw delta.
+    """
+    if not (math.isfinite(d_top) and math.isfinite(d_bot)):
+        return None, None
+    delta = float(d_top - d_bot)
+    scale = max(abs(d_top), abs(d_bot))
+    return (float(delta / max(scale, 1e-6)) if scale > 1e-9 else 0.0), delta
+
+
 def evaluate_explanation_fidelity(
     explainer: LLMExplainer | None,
     prompt_text: str,
@@ -1328,9 +1358,7 @@ def evaluate_explanation_fidelity(
             else:
                 d_bot = 0.0
 
-            delta = float(d_top - d_bot)
-            denom = max(d_top, d_bot, 1e-6)
-            norm_fidelity = float(delta / denom) if max(d_top, d_bot) > 1e-9 else 0.0
+            norm_fidelity, delta = _normalized_ablation_delta(d_top, d_bot)
             return surrogate_r2, norm_fidelity, delta
 
         # If `explainer` is None (e.g. offline inspection of a saved result object),
@@ -1353,9 +1381,7 @@ def evaluate_explanation_fidelity(
                 if top_drops:
                     d_top = float(sum(top_drops) / len(top_drops))
                     d_bot = float(sum(bot_drops) / len(bot_drops)) if bot_drops else 0.0
-                    delta = float(d_top - d_bot)
-                    denom = max(d_top, d_bot, 1e-6)
-                    norm_fidelity = float(delta / denom) if max(d_top, d_bot) > 1e-9 else 0.0
+                    norm_fidelity, delta = _normalized_ablation_delta(d_top, d_bot)
                     return surrogate_r2, norm_fidelity, delta
 
         return surrogate_r2, None, None
